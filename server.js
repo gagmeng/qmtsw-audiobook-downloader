@@ -142,17 +142,68 @@ function siteRequest(targetUrl, opts) {
   });
 }
 
+// 站点侧的 5xx 多为 Cloudflare 回源失败（520/521/522/523/524），
+// 源站恢复的瞬间可能仍在返回这些码，重试几次能明显提升成功率。
+const SITE_MAX_RETRIES = 3;       // 最多额外重试 3 次
+const SITE_RETRY_DELAYS = [800, 2000, 4500];
+
+function isSiteUnavailable(status) {
+  return status >= 500 && status <= 599;
+}
+
+// 把状态码翻译成用户能看懂的原因
+function siteErrorText(status) {
+  const map = {
+    520: '源站暂时不可用（Cloudflare 520：源站返回了无法识别的响应）',
+    521: '源站暂时不可用（Cloudflare 521：源站拒绝连接）',
+    522: '源站暂时不可用（Cloudflare 522：连接源站超时）',
+    523: '源站暂时不可用（Cloudflare 523：源站不可达）',
+    524: '源站暂时不可用（Cloudflare 524：源站响应超时）',
+    525: '源站暂时不可用（Cloudflare 525：TLS 握手失败）',
+    526: '源站暂时不可用（Cloudflare 526：证书无效）',
+    530: '源站暂时不可用（Cloudflare 530）',
+    444: '站点拒绝连接（Cloudflare 444）',
+  };
+  if (map[status]) return `${map[status]}，通常是 qmtsw.com 服务器故障，请稍后重试`;
+  if (status === 404) return '页面不存在（404）';
+  if (status === 403) return '访问被拒绝（403）';
+  return `站点返回 ${status}`;
+}
+
 async function siteGetText(url, opts) {
-  const r = await siteRequest(url, opts);
-  let text = r.body.toString('utf8');
-  // 站点历史上用过 GBK，若 UTF-8 解出大量替换字符则回退
-  if (opts && opts.encoding === 'gbk') {
-    text = r.body.toString('latin1');
+  let lastStatus = 0;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= SITE_MAX_RETRIES; attempt++) {
     try {
-      const iconv = null; // 不引入依赖，改为探测 meta charset
-    } catch (_) {}
+      const r = await siteRequest(url, opts);
+      if (!isSiteUnavailable(r.statusCode)) {
+        let text = r.body.toString('utf8');
+        // 站点历史上用过 GBK，若 UTF-8 解出大量替换字符则回退
+        if (opts && opts.encoding === 'gbk') {
+          text = r.body.toString('latin1');
+        }
+        return { status: r.statusCode, text };
+      }
+      lastStatus = r.statusCode;
+    } catch (e) {
+      lastErr = e;
+    }
+
+    if (attempt < SITE_MAX_RETRIES) {
+      const delay = SITE_RETRY_DELAYS[attempt] || 5000;
+      console.log(`[site] ${url} 第 ${attempt + 1} 次失败` +
+        (lastStatus ? ` (HTTP ${lastStatus})` : ` (${lastErr && lastErr.message})`) +
+        `，${delay}ms 后重试`);
+      await new Promise((res) => setTimeout(res, delay));
+    }
   }
-  return { status: r.statusCode, text };
+
+  // 全部重试用尽
+  if (lastStatus) {
+    return { status: lastStatus, text: '', unavailable: true };
+  }
+  throw lastErr || new Error('站点请求失败');
 }
 
 // ---------- audio CDN download with SNI bypass ----------
@@ -346,7 +397,8 @@ function parsePlayPage(html) {
 }
 
 async function fetchAlbumChapters(albumId) {
-  const { text } = await siteGetText(`${SITE}/show/${albumId}.html`);
+  const { status, text } = await siteGetText(`${SITE}/show/${albumId}.html`);
+  if (status !== 200) throw new Error(siteErrorText(status));
   return parseShowPage(text);
 }
 
@@ -369,7 +421,7 @@ async function getSiteCategoryPage(cat, sitePage) {
 
   const url = sitePage <= 1 ? `${SITE}/book/${cat}.html` : `${SITE}/book/${cat}-${sitePage}.html`;
   const { status, text } = await siteGetText(url);
-  if (status !== 200) throw new Error(`站点返回 ${status}`);
+  if (status !== 200) throw new Error(siteErrorText(status));
   const data = parseCategoryPage(text, cat);
 
   const entry = { items: data.items, totalPages: data.totalPages, at: Date.now() };
@@ -400,7 +452,7 @@ async function getCategorySlice(cat, page, perPage) {
 async function resolveEpisodeAudio(albumId, index, line) {
   line = line == null ? 0 : line;
   const { status, text } = await siteGetText(`${SITE}/play/${albumId}-${line}-${index}.html`);
-  if (status !== 200) throw new Error(`播放页返回 ${status}`);
+  if (status !== 200) throw new Error(siteErrorText(status));
   const { now } = parsePlayPage(text);
   if (!now) throw new Error('播放页中未找到音频地址');
   return now;
