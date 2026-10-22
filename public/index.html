@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>全民听书网 下载器</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<div id="app">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="app-icon">
+        <svg viewBox="0 0 64 64" width="40" height="40">
+          <defs>
+            <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:var(--accent-primary)"/>
+              <stop offset="100%" style="stop-color:var(--accent-secondary)"/>
+            </linearGradient>
+          </defs>
+          <rect x="6" y="10" width="52" height="44" rx="10" fill="url(#logoGrad)" opacity="0.15"/>
+          <circle cx="32" cy="32" r="18" fill="url(#logoGrad)" opacity="0.9"/>
+          <path d="M26 22 L26 42 L44 32 Z" fill="white"/>
+          <path d="M20 16 Q14 22 14 32 Q14 42 20 48" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" opacity="0.5"/>
+          <path d="M44 16 Q50 22 50 32 Q50 42 44 48" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" opacity="0.5"/>
+        </svg>
+      </div>
+      <span class="app-title" data-i18n="appTitle">全民听书网下载器</span>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="browse">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        <span data-i18n="browse">浏览</span>
+      </a>
+      <a href="#" class="nav-item" data-page="downloads">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span data-i18n="downloads">下载</span>
+        <span class="badge" id="downloadBadge" style="display:none">0</span>
+      </a>
+      <a href="#" class="nav-item" data-page="bookmarks">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span data-i18n="bookmarks">收藏</span>
+        <span class="badge" id="bookmarkBadge" style="display:none">0</span>
+      </a>
+      <a href="#" class="nav-item" data-page="settings">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span data-i18n="settings">设置</span>
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="theme-switcher">
+        <button class="theme-btn" data-theme="light" title="Light">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+        </button>
+        <button class="theme-btn" data-theme="dark" title="Dark">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
+        <button class="theme-btn" data-theme="blue" title="Ocean">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+        <button class="theme-btn" data-theme="rose" title="Rose">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2C8 8 6 12 6 16a6 6 0 0 0 12 0c0-4-2-8-6-14z"/>
+          </svg>
+        </button>
+        <button class="theme-btn" data-theme="forest" title="Forest">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L4 14h4l-4 6h16l-4-6h4z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="lang-switcher">
+        <button class="lang-btn active" data-lang="zh">中文</button>
+        <button class="lang-btn" data-lang="en">EN</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content" id="mainContent">
+    <!-- Browse Page -->
+    <div class="page active" id="page-browse">
+      <div class="search-header">
+        <h1 data-i18n="browseTitle">浏览有声书</h1>
+        <div class="search-bar">
+          <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/>
+          </svg>
+          <input type="text" id="albumInput" data-i18n-ph="albumPlaceholder" placeholder="输入专辑ID或专辑链接，例如 21170..." autocomplete="off">
+          <button class="btn-search" id="openAlbumBtn" data-i18n="openAlbum">打开专辑</button>
+        </div>
+        <div class="search-tabs">
+          <button class="tab active" data-tab="category" data-i18n="tabCategory">分类浏览</button>
+          <button class="tab" data-tab="album" data-i18n="tabAlbum">专辑直达</button>
+        </div>
+        <div class="category-tabs" id="categoryTabs">
+          <button class="cat-tab active" data-cat="1">玄幻</button>
+          <button class="cat-tab" data-cat="2">言情</button>
+          <button class="cat-tab" data-cat="3">都市</button>
+          <button class="cat-tab" data-cat="4">恐怖</button>
+          <button class="cat-tab" data-cat="5">惊悚</button>
+          <button class="cat-tab" data-cat="6">推理</button>
+          <button class="cat-tab" data-cat="7">武侠</button>
+          <button class="cat-tab" data-cat="8">历史</button>
+          <button class="cat-tab" data-cat="9">军事</button>
+          <button class="cat-tab" data-cat="10">穿越</button>
+          <button class="cat-tab" data-cat="11">科幻</button>
+          <button class="cat-tab" data-cat="12">网游</button>
+          <button class="cat-tab" data-cat="13">评书</button>
+          <button class="cat-tab" data-cat="14">戏曲</button>
+          <button class="cat-tab" data-cat="15">笑话</button>
+          <button class="cat-tab" data-cat="16">儿童</button>
+          <button class="cat-tab" data-cat="17">财经</button>
+          <button class="cat-tab" data-cat="18">广播</button>
+          <button class="cat-tab" data-cat="19">诗歌</button>
+          <button class="cat-tab" data-cat="20">文学</button>
+          <button class="cat-tab" data-cat="21">粤语</button>
+          <button class="cat-tab" data-cat="22">经典</button>
+          <button class="cat-tab" data-cat="23">相声小品</button>
+          <button class="cat-tab" data-cat="24">百家讲坛</button>
+        </div>
+      </div>
+      <div class="search-results" id="searchResults">
+        <div class="empty-state" id="emptyState">
+          <svg viewBox="0 0 120 120" width="80" height="80">
+            <defs>
+              <linearGradient id="emptyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" style="stop-color:var(--accent-primary);stop-opacity:0.3"/>
+                <stop offset="100%" style="stop-color:var(--accent-secondary);stop-opacity:0.1"/>
+              </linearGradient>
+            </defs>
+            <circle cx="60" cy="60" r="50" fill="url(#emptyGrad)"/>
+            <circle cx="60" cy="60" r="22" fill="none" stroke="var(--accent-primary)" stroke-width="2.5" opacity="0.5"/>
+            <path d="M52 50 L52 70 L70 60 Z" fill="var(--accent-primary)" opacity="0.5"/>
+          </svg>
+          <p data-i18n="emptyHint">选择一个分类开始浏览，或直接输入专辑ID</p>
+        </div>
+      </div>
+      <div class="pagination" id="pagination" style="display:none">
+        <span class="page-size-selector">
+          <span data-i18n="perPageLabel">每页</span>
+          <select id="perPageSelect" class="page-size-select">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="40">40</option>
+            <option value="80">80</option>
+            <option value="120">120</option>
+          </select>
+          <span data-i18n="perPageUnit">条</span>
+        </span>
+        <button class="page-btn" id="prevPage" data-i18n="prev">上一页</button>
+        <span class="page-info" id="pageInfo">1 / 1</span>
+        <button class="page-btn" id="nextPage" data-i18n="next">下一页</button>
+        <span class="page-jump">
+          <span data-i18n="jumpTo">跳至</span>
+          <input type="number" id="pageJumpInput" class="page-jump-input" min="1" value="1" />
+          <span data-i18n="pageUnit">页</span>
+          <button class="page-btn page-jump-btn" id="pageJumpBtn" data-i18n="go">Go</button>
+        </span>
+      </div>
+    </div>
+
+    <!-- Downloads Page -->
+    <div class="page" id="page-downloads">
+      <div class="page-header">
+        <h1 data-i18n="downloadsTitle">下载管理</h1>
+        <div class="page-header-actions">
+          <button class="btn-secondary btn-danger" id="stopAllDownloads" data-i18n="stopAll">全部停止</button>
+          <button class="btn-secondary" id="retryAllDownloads" data-i18n="retryAll">全部重试</button>
+          <button class="btn-secondary" id="clearDownloads" data-i18n="clearAll">清空已完成</button>
+        </div>
+      </div>
+      <div class="download-stats" id="downloadStats"></div>
+      <div class="download-list" id="downloadList">
+        <div class="empty-state">
+          <svg viewBox="0 0 120 120" width="80" height="80">
+            <circle cx="60" cy="60" r="50" fill="var(--bg-secondary)"/>
+            <path d="M45 55 L45 85 Q45 92 52 92 L68 92 Q75 92 75 85 L75 55" fill="none" stroke="var(--text-tertiary)" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M55 65 L55 80 M60 65 L60 80 M65 65 L65 80" stroke="var(--text-tertiary)" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+            <path d="M50 55 L50 48 Q50 40 60 40 Q70 40 70 48 L70 55" fill="none" stroke="var(--text-tertiary)" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <p data-i18n="noDownloads">暂无下载任务</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bookmarks Page -->
+    <div class="page" id="page-bookmarks">
+      <div class="page-header">
+        <h1 data-i18n="bookmarksTitle">收藏列表</h1>
+      </div>
+      <div class="bookmark-list" id="bookmarkList">
+        <div class="empty-state">
+          <svg viewBox="0 0 120 120" width="80" height="80">
+            <circle cx="60" cy="60" r="50" fill="var(--bg-secondary)"/>
+            <path d="M45 35 L45 85 L60 72 L75 85 L75 35 Q75 32 72 32 L48 32 Q45 32 45 35 Z" fill="none" stroke="var(--text-tertiary)" stroke-width="2.5" stroke-linejoin="round"/>
+          </svg>
+          <p data-i18n="noBookmarks">暂无收藏</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Page -->
+    <div class="page" id="page-settings">
+      <div class="page-header">
+        <h1 data-i18n="settingsTitle">设置</h1>
+      </div>
+      <div class="settings-list">
+        <div class="setting-item">
+          <div class="setting-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+          </div>
+          <div class="setting-info">
+            <span class="setting-label" data-i18n="savePath">保存路径</span>
+            <span class="setting-desc" data-i18n="savePathDesc">音频文件的默认保存位置</span>
+            <span class="setting-desc" id="diskFreeInfo"></span>
+          </div>
+          <div class="setting-input-group">
+            <input type="text" id="savePathInput" value="~/Downloads" class="setting-input">
+            <button class="btn-browse" id="browseFolderBtn" data-i18n="browse">浏览...</button>
+          </div>
+        </div>
+        <div class="setting-item">
+          <div class="setting-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+          </div>
+          <div class="setting-info">
+            <span class="setting-label" data-i18n="refreshInterval">刷新间隔</span>
+            <span class="setting-desc" data-i18n="refreshIntervalDesc">下载任务状态刷新间隔（毫秒）</span>
+          </div>
+          <input type="number" id="refreshInput" value="1000" min="500" max="5000" step="100" class="setting-input" style="width:100px">
+        </div>
+        <div class="setting-item">
+          <div class="setting-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+          </div>
+          <div class="setting-info">
+            <span class="setting-label" data-i18n="theme">主题模式</span>
+            <span class="setting-desc" data-i18n="themeDesc">选择界面配色方案</span>
+          </div>
+          <select id="themeSelect" class="setting-input">
+            <option value="light" data-i18n="themeLight">浅色</option>
+            <option value="dark" data-i18n="themeDark">深色</option>
+            <option value="blue" data-i18n="themeBlue">海洋蓝</option>
+            <option value="rose" data-i18n="themeRose">玫瑰金</option>
+            <option value="forest" data-i18n="themeForest">森林绿</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <div class="setting-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            </svg>
+          </div>
+          <div class="setting-info">
+            <span class="setting-label" data-i18n="language">语言</span>
+            <span class="setting-desc" data-i18n="languageDesc">界面显示语言</span>
+          </div>
+          <select id="langSelect" class="setting-input">
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <div class="setting-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+          </div>
+          <div class="setting-info">
+            <span class="setting-label" data-i18n="about">关于</span>
+            <span class="setting-desc">QMTSW Audio Downloader v1.0.0 · qmtsw.com</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Album Detail Modal -->
+  <div class="modal-overlay" id="detailModal" style="display:none">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2 id="detailTitle">专辑详情</h2>
+        <button class="modal-close" id="modalClose">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body" id="detailBody"></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast" style="display:none"></div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay" style="display:none">
+    <div class="spinner"></div>
+    <p id="loadingText" data-i18n="loading">加载中...</p>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

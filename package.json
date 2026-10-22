@@ -1,0 +1,10 @@
+{
+  "name": "qmtsw-downloader-web",
+  "version": "1.0.0",
+  "description": "Web-based audio downloader for qmtsw.com (全民听书网)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
