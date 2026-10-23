@@ -65,6 +65,20 @@ const I18N = {
     noRetryTasks: '没有可重试的任务',
     skippedMissing: '{n} 个源站缺失的集已跳过',
     missing: '源站缺失',
+    library: '媒体库', libraryTitle: '本地媒体库', librarySearch: '搜索文件名或专辑...',
+    refresh: '刷新', noLibrary: '未找到音频文件',
+    libraryAlbums: '个专辑', libraryFiles: '个文件', viewChapters: '查看章节', collapseChapters: '收起章节',
+    tabSearch: '本地搜索', localSearch: '搜索', localSearchPlaceholder: '搜索已浏览或打开的专辑...',
+    selectAll: '全选', invertSelection: '反选', selectPending: '未下载/失败',
+    downloadSelected: '下载所选', exportIssues: '导出失败清单', noSelection: '请先选择章节',
+    noIssues: '没有可导出的失败记录', newChapters: '{n} 个新章节',
+    checkUpdates: '检查更新', updatesFound: '发现 {n} 本收藏有更新', noUpdates: '收藏暂无更新',
+    autoUpdate: '收藏自动更新', autoUpdateDesc: '定期检查新章节，开启后自动下载新增部分',
+    updateInterval: '收藏检查间隔（分钟）', concurrency: '下载并发',
+    speedLimit: '总限速（KB/s，0 不限）', maxRetries: '失败重试次数',
+    retryBase: '重试基础延迟（毫秒）', scheduledStart: '队列计划开始时间',
+    saveStrategy: '保存下载策略', strategySaved: '下载策略已保存',
+    proxyTest: '测试代理与直连', proxyTesting: '正在测试连通性...', useProxy: '使用代理（如已配置）', proxyAddress: '代理地址（host:port）',
   },
   en: {
     appTitle: 'QMTSW Audio Downloader',
@@ -124,6 +138,20 @@ const I18N = {
     noRetryTasks: 'No tasks to retry',
     skippedMissing: '{n} missing-on-source episode(s) skipped',
     missing: 'Missing',
+    library: 'Library', libraryTitle: 'Local Library', librarySearch: 'Search file or album...',
+    refresh: 'Refresh', noLibrary: 'No audio files found',
+    libraryAlbums: 'albums', libraryFiles: 'files', viewChapters: 'View chapters', collapseChapters: 'Hide chapters',
+    tabSearch: 'Local Search', localSearch: 'Search', localSearchPlaceholder: 'Search browsed or opened albums...',
+    selectAll: 'Select All', invertSelection: 'Invert', selectPending: 'Pending / Failed',
+    downloadSelected: 'Download Selected', exportIssues: 'Export Failures', noSelection: 'Select chapters first',
+    noIssues: 'No failures to export', newChapters: '{n} new chapter(s)',
+    checkUpdates: 'Check Updates', updatesFound: '{n} favorite album(s) updated', noUpdates: 'No favorite updates',
+    autoUpdate: 'Favorite Auto-update', autoUpdateDesc: 'Check for new chapters and download them automatically',
+    updateInterval: 'Favorite check interval (minutes)', concurrency: 'Download Concurrency',
+    speedLimit: 'Total speed limit (KB/s, 0 = unlimited)', maxRetries: 'Retry Count',
+    retryBase: 'Base retry delay (ms)', scheduledStart: 'Scheduled queue start',
+    saveStrategy: 'Save Download Strategy', strategySaved: 'Download strategy saved',
+    proxyTest: 'Test Proxy & Direct', proxyTesting: 'Testing connectivity...', useProxy: 'Use proxy when configured', proxyAddress: 'Proxy address (host:port)',
   },
 };
 
@@ -142,6 +170,14 @@ const state = {
   tasks: [],
   stats: null,
   taskTimer: null,
+  categoryRequestSeq: 0,
+  library: [],
+  libraryTotal: 0,
+  serverSettings: null,
+  bookmarkTimer: null,
+  checkingBookmarks: false,
+  autoUpdate: localStorage.getItem('autoUpdate') === '1',
+  updateIntervalMin: parseInt(localStorage.getItem('updateIntervalMin') || '30', 10),
   bookmarks: JSON.parse(localStorage.getItem('bookmarks') || '[]'),
   pageMode: 'browse',
 };
@@ -180,12 +216,17 @@ function showLoading(text) {
 }
 function hideLoading() { $('#loadingOverlay').style.display = 'none'; }
 
-async function api(path, params) {
+async function api(path, params, options) {
   const url = new URL(path, window.location.origin);
   if (params) Object.entries(params).forEach(([k, v]) => {
     if (v != null) url.searchParams.set(k, v);
   });
-  const r = await fetch(url);
+  const opts = options || {};
+  const r = await fetch(url, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
@@ -232,14 +273,17 @@ function switchPage(page) {
   $$('.page').forEach((p) => p.classList.remove('active'));
   const el = $(`#page-${page}`);
   if (el) el.classList.add('active');
-  if (page === 'downloads') { renderTasks(); startTaskPolling(); }
-  else stopTaskPolling();
+  if (page === 'downloads') renderTasks();
+  if (page === 'library') loadLibrary();
   if (page === 'bookmarks') renderBookmarks();
+  startTaskPolling();
 }
 
 // ---------------- browse ----------------
 
 async function loadCategory(cat, page) {
+  const requestSeq = ++state.categoryRequestSeq;
+  state.pageMode = 'category';
   state.category = cat;
   state.page = page || 1;
   showLoading(t('loading'));
@@ -247,15 +291,17 @@ async function loadCategory(cat, page) {
     const data = await api('/api/category', {
       cat: state.category, page: state.page, perPage: state.perPage,
     });
+    if (requestSeq !== state.categoryRequestSeq) return;
     state.results = data.items || [];
     state.totalPages = Math.max(1, data.totalPages || 1);
     state.totalItems = data.totalItems || 0;
     state.page = Math.min(state.page, state.totalPages);
     renderResults();
   } catch (e) {
+    if (requestSeq !== state.categoryRequestSeq) return;
     showToast(`${t('loadFailed')}: ${e.message}`);
   } finally {
-    hideLoading();
+    if (requestSeq === state.categoryRequestSeq) hideLoading();
   }
 }
 
@@ -290,8 +336,10 @@ function renderResults() {
     return;
   }
 
-  const catName = CATEGORY_NAMES[state.category] || '';
   container.innerHTML = state.results.map((item) => {
+    const catName = state.pageMode === 'search'
+      ? CATEGORY_NAMES[item.category] || t('tabSearch')
+      : CATEGORY_NAMES[state.category] || '';
     const isBm = state.bookmarks.some((b) => b.id === item.id);
     return `<div class="result-card" data-id="${escapeHtml(item.id)}">
       <div class="card-cover">
@@ -335,7 +383,7 @@ function renderResults() {
   });
 
   // pagination —— 只要有结果就显示，方便随时改每页条数
-  if (state.results.length) {
+  if (state.results.length && state.pageMode === 'category') {
     $('#pagination').style.display = 'flex';
     $('#pageInfo').textContent = `${state.page} / ${state.totalPages}`
       + (state.totalItems ? ` · ${state.totalItems}` : '');
@@ -431,10 +479,18 @@ function renderAlbumModal(album) {
       <button class="btn-secondary btn-sm" id="dlRangeBtn">${t('download')}</button>
       <span style="margin-left:auto" id="albumTaskSummary"></span>
     </div>
+    <div class="chapter-toolbar chapter-batch-toolbar">
+      <button class="btn-secondary btn-sm" id="selectAllChapters">${t('selectAll')}</button>
+      <button class="btn-secondary btn-sm" id="invertChapters">${t('invertSelection')}</button>
+      <button class="btn-secondary btn-sm" id="selectPendingChapters">${t('selectPending')}</button>
+      <button class="btn-primary btn-sm" id="dlSelectedBtn">${t('downloadSelected')}</button>
+      <button class="btn-secondary btn-sm" id="exportIssuesBtn">${t('exportIssues')}</button>
+    </div>
 
     <div class="chapter-list" id="chapterList">
       ${chapters.map((ch) => `
         <div class="chapter-item" data-index="${ch.index}">
+          <input type="checkbox" class="chapter-check" data-check="${ch.index}" aria-label="${escapeHtml(ch.title)}">
           <span class="chapter-index">${String(ch.index + 1).padStart(4, '0')}</span>
           <span class="chapter-title" title="${escapeHtml(ch.title)}">${escapeHtml(ch.title)}</span>
           <span class="chapter-status" data-status-for="${ch.index}"></span>
@@ -446,7 +502,7 @@ function renderAlbumModal(album) {
 
   $('#dlAlbumAll').addEventListener('click', () => downloadAlbum(album.id));
   $('#bmAlbumBtn').addEventListener('click', () => {
-    toggleBookmark({ id: album.id, title: album.title, cover: album.cover ? album.cover.replace('https://www.qmtsw.com', '') : '' });
+    toggleBookmark({ id: album.id, title: album.title, cover: album.cover ? album.cover.replace('https://www.qmtsw.com', '') : '', chapterCount: chapters.length });
     $('#bmAlbumBtn').textContent = isBookmarked(album.id) ? `★ ${t('bookmarks')}` : t('bookmarks');
   });
   $('#dlRangeBtn').addEventListener('click', () => {
@@ -454,6 +510,25 @@ function renderAlbumModal(album) {
     const to = Math.min(chapters.length - 1, (parseInt($('#rangeTo').value, 10) || chapters.length) - 1);
     downloadAlbum(album.id, from, to);
   });
+  $('#selectAllChapters').addEventListener('click', () => {
+    $$('.chapter-check').forEach((box) => { box.checked = true; });
+  });
+  $('#invertChapters').addEventListener('click', () => {
+    $$('.chapter-check').forEach((box) => { box.checked = !box.checked; });
+  });
+  $('#selectPendingChapters').addEventListener('click', () => {
+    const statuses = chapterStatusMap();
+    $$('.chapter-check').forEach((box) => {
+      const task = statuses[parseInt(box.dataset.check, 10)];
+      box.checked = !task || task.status !== 'done';
+    });
+  });
+  $('#dlSelectedBtn').addEventListener('click', () => {
+    const indexes = Array.from($$('.chapter-check:checked')).map((box) => parseInt(box.dataset.check, 10));
+    if (!indexes.length) { showToast(t('noSelection')); return; }
+    downloadAlbum(album.id, null, null, indexes);
+  });
+  $('#exportIssuesBtn').addEventListener('click', () => exportChapterIssues(album));
   body.querySelectorAll('.chapter-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.dl, 10);
@@ -465,11 +540,33 @@ function renderAlbumModal(album) {
   updateChapterStatuses();
 }
 
+function exportChapterIssues(album) {
+  const latest = new Map();
+  for (const task of state.tasks) {
+    if (String(task.albumId) !== String(album.id) || task.status !== 'error') continue;
+    if (!latest.has(task.index) || latest.get(task.index).id < task.id) latest.set(task.index, task);
+  }
+  const rows = [...latest.values()].sort((a, b) => a.index - b.index);
+  if (!rows.length) { showToast(t('noIssues')); return; }
+  const csv = [
+    ['章节序号', '章节标题', '状态', '原因'],
+    ...rows.map((task) => [task.index + 1, task.chapterTitle || task.fileName,
+      /源站缺失/.test(task.error || '') ? '源站缺失' : '失败', task.error || '']),
+  ].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${String(album.title || album.id).replace(/[<>:"/\\|?*]/g, '_')}-失败清单.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function chapterStatusMap() {
   const map = {};
   for (const task of state.tasks) {
     if (task.albumId !== String(state.currentAlbum && state.currentAlbum.id)) continue;
-    map[task.index] = task;
+    if (!map[task.index] || map[task.index].id < task.id) map[task.index] = task;
   }
   return map;
 }
@@ -522,6 +619,7 @@ async function downloadChapter(album, chapter) {
       line: chapter.line,
       title: chapter.title,
       album: album.title,
+      cover: album.cover || '',
       path: state.savePath,
     });
     showToast(t('toastQueued'));
@@ -531,13 +629,14 @@ async function downloadChapter(album, chapter) {
   }
 }
 
-async function downloadAlbum(id, from, to) {
+async function downloadAlbum(id, from, to, indexes) {
   id = extractAlbumId(id);
   if (!id) { showToast(t('enterAlbumHint')); return; }
   try {
     const params = { id, mode: 'album', path: state.savePath };
     if (from != null) params.from = from;
     if (to != null) params.to = to;
+    if (indexes && indexes.length) params.indexes = indexes.join(',');
     const r = await api('/api/download', params);
     showToast(`${t('toastQueued')} (${r.queued})`);
     refreshTasks();
@@ -732,10 +831,12 @@ function toggleBookmark(item, cardEl) {
       id: String(item.id),
       title: item.title || String(item.id),
       cover: item.cover || '',
+      chapterCount: Number.isFinite(item.chapterCount) ? item.chapterCount : null,
+      newCount: 0,
+      lastChecked: 0,
     });
   }
-  localStorage.setItem('bookmarks', JSON.stringify(state.bookmarks));
-  updateBadges();
+  saveBookmarks();
   renderBookmarks();
   if (cardEl) {
     const btn = cardEl.querySelector('[data-action="bookmark"]');
@@ -765,7 +866,7 @@ function renderBookmarks() {
       ${b.cover ? `<img class="bookmark-cover" src="${coverUrl(b.cover)}" alt="" onerror="this.style.display='none'">` : ''}
       <div class="bookmark-info">
         <div class="bm-title">${escapeHtml(b.title)}</div>
-        <div class="bm-sub">ID: ${escapeHtml(b.id)}</div>
+        <div class="bm-sub">ID: ${escapeHtml(b.id)}${b.chapterCount != null ? ` · ${b.chapterCount} ${t('chapters')}` : ''}${b.newCount ? ` · ${t('newChapters').replace('{n}', b.newCount)}` : ''}</div>
       </div>
       <button class="card-btn" data-bm="open" data-id="${escapeHtml(b.id)}">${t('viewDetail')}</button>
       <button class="card-btn" data-bm="dl" data-id="${escapeHtml(b.id)}">${t('downloadAll')}</button>
@@ -793,7 +894,223 @@ function updateBadges() {
   else badge.style.display = 'none';
 }
 
+// ---------------- local discovery & library ----------------
+
+async function localSearch() {
+  const query = $('#localSearchInput').value.trim();
+  state.categoryRequestSeq++;
+  state.pageMode = 'search';
+  showLoading(t('loading'));
+  try {
+    const data = await api('/api/search', { q: query });
+    state.results = data.items || [];
+    renderResults();
+    const history = $('#searchHistory');
+    history.innerHTML = (data.history || []).slice(0, 8).map((q) =>
+      `<button class="history-btn" data-query="${escapeHtml(q)}">${escapeHtml(q)}</button>`).join('');
+    history.querySelectorAll('[data-query]').forEach((btn) => btn.addEventListener('click', () => {
+      $('#localSearchInput').value = btn.dataset.query;
+      localSearch();
+    }));
+  } catch (e) {
+    showToast(`${t('loadFailed')}: ${e.message}`);
+  } finally {
+    hideLoading();
+  }
+}
+
+async function loadLibrary() {
+  try {
+    const data = await api('/api/library', {
+      path: state.savePath,
+      q: $('#librarySearchInput') ? $('#librarySearchInput').value.trim() : '',
+    });
+    state.library = data.items || [];
+    state.libraryTotal = data.total || 0;
+    renderLibrary(data);
+  } catch (e) {
+    showToast(`${t('loadFailed')}: ${e.message}`);
+  }
+}
+
+function renderLibrary(meta) {
+  const container = $('#libraryList');
+  if (!container) return;
+  const grouped = new Map();
+  state.library.forEach((item) => {
+    const relative = String(item.relativePath || item.name);
+    const directory = relative.slice(0, Math.max(0, relative.length - item.name.length)).replace(/[\\/]+$/, '');
+    const key = directory ? `dir:${directory}` : 'root:';
+    if (!grouped.has(key)) grouped.set(key, { title: item.album || t('libraryTitle'), items: [], size: 0, mtime: 0, cover: '' });
+    const group = grouped.get(key);
+    group.items.push(item);
+    if (!group.cover && item.cover) group.cover = item.cover;
+    group.size += Number(item.size) || 0;
+    group.mtime = Math.max(group.mtime, Number(item.mtime) || 0);
+  });
+  const albums = Array.from(grouped.values()).sort((a, b) => b.mtime - a.mtime);
+  $('#libraryStats').textContent = `${albums.length} ${t('libraryAlbums')} · ${state.libraryTotal} ${t('libraryFiles')} · ${meta && meta.root ? meta.root : state.savePath}`;
+  if (!state.library.length) {
+    container.innerHTML = `<div class="empty-state"><p>${escapeHtml(t('noLibrary'))}</p></div>`;
+    return;
+  }
+  container.innerHTML = albums.map((group) => {
+    group.items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    return `<div class="result-card library-album-card">
+      <div class="card-cover library-cover" data-lib-album>
+        ${group.cover
+          ? `<img src="/api/library-cover?path=${encodeURIComponent(group.cover)}" alt="" loading="lazy" onerror="this.outerHTML=placeholderSvg()">`
+          : placeholderSvg()}
+      </div>
+      <div class="card-title">${escapeHtml(group.title)}</div>
+      <div class="card-meta">
+        <span class="meta-tag type-tag">${group.items.length} ${t('libraryFiles')}</span>
+        <span class="meta-tag">${formatBytes(group.size)}</span>
+      </div>
+      <div class="card-actions">
+        <button class="card-btn library-album-toggle" data-lib-album aria-expanded="false">${t('viewChapters')}</button>
+      </div>
+      <div class="library-chapters">${group.items.map((item) => `<div class="library-item">
+        <div class="library-info">
+          <div class="library-name">${escapeHtml(item.name)}</div>
+          <div class="library-meta">${formatBytes(item.size)} · ${new Date(item.mtime).toLocaleString()}</div>
+        </div>
+        <div class="library-actions">
+          <button class="card-btn" data-lib="open" data-path="${escapeHtml(item.path)}">${t('openFile')}</button>
+          <button class="card-btn" data-lib="reveal" data-path="${escapeHtml(item.path)}">${t('revealFile')}</button>
+          <button class="card-btn" data-lib="delete" data-path="${escapeHtml(item.path)}">${t('deleteFile')}</button>
+        </div>
+      </div>`).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---------------- bookmark updates ----------------
+
+function saveBookmarks() {
+  localStorage.setItem('bookmarks', JSON.stringify(state.bookmarks));
+  updateBadges();
+}
+
+async function checkBookmarkUpdates(manual) {
+  if (state.checkingBookmarks) return;
+  if (!state.bookmarks.length) {
+    if (manual) showToast(t('noBookmarks'));
+    return;
+  }
+  state.checkingBookmarks = true;
+  let updated = 0;
+  let failed = 0;
+  try {
+    for (const bookmark of state.bookmarks) {
+      try {
+        const album = await api('/api/album', { id: bookmark.id });
+        const count = (album.chapters || []).length;
+        const previous = Number.isFinite(bookmark.chapterCount) ? bookmark.chapterCount : null;
+        bookmark.title = album.title || bookmark.title;
+        bookmark.cover = album.cover || bookmark.cover || '';
+        if (previous == null) {
+          bookmark.chapterCount = count;
+        } else if (count > previous) {
+          bookmark.newCount = count - previous;
+          updated++;
+          bookmark.chapterCount = count;
+          if (state.autoUpdate) {
+            await downloadAlbum(bookmark.id, previous, count - 1);
+            bookmark.newCount = 0;
+          }
+        } else {
+          bookmark.chapterCount = count;
+          bookmark.newCount = 0;
+        }
+        bookmark.lastChecked = Date.now();
+      } catch (_) {
+        failed++;
+      }
+    }
+    saveBookmarks();
+    renderBookmarks();
+    if (manual) {
+      if (updated) showToast(t('updatesFound').replace('{n}', updated));
+      else if (!failed) showToast(t('noUpdates'));
+      else showToast(`${t('loadFailed')} (${failed})`);
+    }
+  } finally {
+    state.checkingBookmarks = false;
+  }
+}
+
+function restartBookmarkTimer() {
+  if (state.bookmarkTimer) clearInterval(state.bookmarkTimer);
+  const minutes = Math.max(5, Math.min(1440, state.updateIntervalMin || 30));
+  state.bookmarkTimer = setInterval(() => checkBookmarkUpdates(false), minutes * 60000);
+}
+
 // ---------------- settings ----------------
+
+async function loadServerSettings() {
+  try {
+    const data = await api('/api/settings');
+    state.serverSettings = data.settings;
+    const s = data.settings;
+    $('#concurrencyInput').value = s.concurrency;
+    $('#speedLimitInput').value = Math.round(s.speedLimitBps / 1024);
+    $('#maxRetriesInput').value = s.maxRetries;
+    $('#retryBaseInput').value = s.retryBaseMs;
+    $('#useProxyInput').checked = s.useProxy !== false;
+    $('#proxyAddressInput').value = s.proxyAddress == null ? '127.0.0.1:7890' : s.proxyAddress;
+    if (s.downloadRoot) {
+      state.savePath = s.downloadRoot;
+      $('#savePathInput').value = s.downloadRoot;
+      localStorage.setItem('savePath', s.downloadRoot);
+    }
+    if (s.startAt) {
+      const date = new Date(s.startAt);
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      $('#scheduleInput').value = local.toISOString().slice(0, 16);
+    }
+  } catch (e) {
+    showToast(`${t('loadFailed')}: ${e.message}`);
+  }
+}
+
+async function saveServerSettings(partial) {
+  const data = await api('/api/settings', null, { method: 'POST', body: partial });
+  state.serverSettings = data.settings;
+  return data;
+}
+
+async function saveStrategySettings() {
+  try {
+    const schedule = $('#scheduleInput').value;
+    await saveServerSettings({
+      concurrency: parseInt($('#concurrencyInput').value, 10),
+      speedLimitBps: Math.max(0, parseInt($('#speedLimitInput').value, 10) || 0) * 1024,
+      maxRetries: parseInt($('#maxRetriesInput').value, 10),
+      retryBaseMs: parseInt($('#retryBaseInput').value, 10),
+      useProxy: $('#useProxyInput').checked,
+      proxyAddress: $('#proxyAddressInput').value.trim(),
+      startAt: schedule ? new Date(schedule).toISOString() : '',
+      downloadRoot: state.savePath,
+    });
+    showToast(t('strategySaved'));
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function testProxyConnections() {
+  const output = $('#proxyTestResult');
+  output.textContent = t('proxyTesting');
+  try {
+    const data = await api('/api/proxy-test');
+    output.innerHTML = (data.results || []).map((result) => `<div class="${result.ok ? 'proxy-ok' : 'proxy-error'}">
+      ${escapeHtml(result.label)} · ${result.ok ? `HTTP ${result.status}` : escapeHtml(result.error || 'Failed')} · ${result.elapsedMs} ms
+    </div>`).join('');
+  } catch (e) {
+    output.textContent = e.message;
+  }
+}
 
 async function updateDiskFree() {
   try {
@@ -843,9 +1160,54 @@ function bindEvents() {
       tab.classList.add('active');
       state.pageMode = tab.dataset.tab;
       $('#categoryTabs').style.display = state.pageMode === 'category' ? 'flex' : 'none';
+      $('#localSearchBar').style.display = state.pageMode === 'search' ? 'flex' : 'none';
       if (state.pageMode === 'category') loadCategory(state.category, state.page);
+      else if (state.pageMode === 'search') localSearch();
+      else {
+        state.categoryRequestSeq++;
+        $('#pagination').style.display = 'none';
+      }
     });
   });
+
+  $('#localSearchBtn').addEventListener('click', localSearch);
+  $('#localSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') localSearch();
+  });
+
+  $('#librarySearchBtn').addEventListener('click', loadLibrary);
+  $('#libraryRefreshBtn').addEventListener('click', loadLibrary);
+  $('#librarySearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadLibrary();
+  });
+  $('#libraryList').addEventListener('click', async (e) => {
+    const albumTrigger = e.target.closest('[data-lib-album]');
+    if (albumTrigger) {
+      const card = albumTrigger.closest('.library-album-card');
+      const expanded = card.classList.toggle('expanded');
+      const toggle = card.querySelector('.library-album-toggle');
+      toggle.textContent = t(expanded ? 'collapseChapters' : 'viewChapters');
+      toggle.setAttribute('aria-expanded', String(expanded));
+      return;
+    }
+    const btn = e.target.closest('[data-lib]');
+    if (!btn) return;
+    const action = btn.dataset.lib;
+    try {
+      if (action === 'delete') {
+        if (!confirm(t('confirmDelete'))) return;
+        await api('/api/delete-file', { path: btn.dataset.path });
+        showToast(t('toastDeleted'));
+        loadLibrary();
+      } else {
+        await api(action === 'open' ? '/api/open-file' : '/api/reveal-file', { path: btn.dataset.path });
+      }
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  $('#checkBookmarksBtn').addEventListener('click', () => checkBookmarkUpdates(true));
 
   // album direct open
   $('#openAlbumBtn').addEventListener('click', () => openAlbum($('#albumInput').value, true));
@@ -944,6 +1306,7 @@ function bindEvents() {
   $('#savePathInput').addEventListener('change', (e) => {
     state.savePath = e.target.value;
     localStorage.setItem('savePath', state.savePath);
+    saveServerSettings({ downloadRoot: state.savePath }).catch((error) => showToast(error.message));
     updateDiskFree();
     showToast(t('toastSaved'));
   });
@@ -959,6 +1322,7 @@ function bindEvents() {
         state.savePath = data.path;
         $('#savePathInput').value = data.path;
         localStorage.setItem('savePath', data.path);
+        saveServerSettings({ downloadRoot: data.path }).catch((error) => showToast(error.message));
         updateDiskFree();
         showToast(t('toastSaved'));
       }
@@ -977,6 +1341,21 @@ function bindEvents() {
     if (state.taskTimer) { stopTaskPolling(); startTaskPolling(); }
     showToast(t('toastSaved'));
   });
+
+  $('#saveStrategyBtn').addEventListener('click', saveStrategySettings);
+  $('#proxyTestBtn').addEventListener('click', testProxyConnections);
+  $('#autoUpdateInput').addEventListener('change', (e) => {
+    state.autoUpdate = e.target.checked;
+    localStorage.setItem('autoUpdate', state.autoUpdate ? '1' : '0');
+    showToast(t('toastSaved'));
+  });
+  $('#updateIntervalInput').addEventListener('change', (e) => {
+    state.updateIntervalMin = Math.max(5, Math.min(1440, parseInt(e.target.value, 10) || 30));
+    e.target.value = state.updateIntervalMin;
+    localStorage.setItem('updateIntervalMin', state.updateIntervalMin);
+    restartBookmarkTimer();
+    showToast(t('toastSaved'));
+  });
 }
 
 // ---------------- init ----------------
@@ -987,12 +1366,16 @@ function init() {
   $('#savePathInput').value = state.savePath;
   $('#refreshInput').value = state.refreshInterval;
   $('#perPageSelect').value = String(state.perPage);
+  $('#autoUpdateInput').checked = state.autoUpdate;
+  $('#updateIntervalInput').value = state.updateIntervalMin;
   bindEvents();
   updateBadges();
-  updateDiskFree();
+  loadServerSettings().then(updateDiskFree);
   refreshTasks();
   loadCategory(1, 1);
   startTaskPolling();
+  restartBookmarkTimer();
+  setTimeout(() => checkBookmarkUpdates(false), 3000);
 
   // 支持 ?album=21170 直接打开专辑
   const params = new URLSearchParams(window.location.search);

@@ -10,17 +10,22 @@
 node server.js
 ```
 
+macOS / Linux 可运行 `sh start.sh`（或 `npm run start:posix`）。可通过
+`QMTSW_PORT` 修改端口，`QMTSW_DATA_DIR` 修改任务与索引的持久化目录，
+POSIX 启动时可用 `QMTSW_NO_BROWSER=1` 禁止自动打开浏览器。
+
 浏览器打开 http://localhost:3211
 
 无需 `npm install`，没有第三方依赖。
 
 ### 站点访问代理
 
-Node 的 `http`/`https` 不读取 `HTTP(S)_PROXY`，也不读 Windows 系统代理，因此本服务自行处理代理，优先级为：
+Node 的 `http`/`https` 不读取 `HTTP(S)_PROXY`，也不读 Windows 系统代理，因此本服务自行处理代理。设置页可开关代理并编辑首选地址（默认 `127.0.0.1:7890`）；`QMTSW_PROXY` 设为 `none` / `off` / `direct` 时会强制直连。候选优先级为：
 
-1. 环境变量 `QMTSW_PROXY`（设为 `none` / `off` / `direct` 可强制直连）
-2. 环境变量 `HTTPS_PROXY` / `HTTP_PROXY`
-3. Windows 注册表里的系统代理（含 `分号分隔的 http=…;https=…` 形式）
+1. 设置页保存的代理地址
+2. 环境变量 `QMTSW_PROXY`
+3. 环境变量 `HTTPS_PROXY` / `HTTP_PROXY`
+4. Windows 注册表里的系统代理（含 `分号分隔的 http=…;https=…` 形式）
 
 代理只用于站点页面请求；音频 CDN 仍按 IP + `Host` 头直连，不受代理影响。若代理连不上，会自动回退直连。
 
@@ -36,6 +41,13 @@ Node 的 `http`/`https` 不读取 `HTTP(S)_PROXY`，也不读 Windows 系统代�
 - **下载管理**：任务队列（3 路并发）、进度条、速度、单个/全部重试、全部停止、打开文件 / 定位文件夹
 - **收藏**：收藏专辑，随时回来下载
 - **设置**：保存路径、刷新间隔、主题、语言
+- **可靠续传**：任务与配置持久化，`.part` 断点续传，长度 / MD5 校验后原子改名，下载时自动保存专辑封面
+- **批量章节**：复选、全选、反选、仅选未完成，支持失败 / 源站缺失清单导出
+- **收藏更新**：手动或定时检查新章节，可自动下载新增部分
+- **本地媒体库**：按专辑卡片展示封面与章节，支持搜索、打开、定位或在受管目录内删除
+- **本地搜索**：搜索浏览 / 打开过的专辑索引与搜索历史
+- **下载策略**：可调并发、总限速、重试次数与退避、计划开始时间，支持代理开关、地址配置与诊断
+- **跨平台**：Windows / macOS / Linux 的目录选择、打开文件与定位适配
 - **五套主题**：浅色 / 深色 / 海洋蓝 / 玫瑰金 / 森林绿
 - **中英双语**
 
@@ -71,10 +83,15 @@ Node 的 `http`/`https` 不读取 `HTTP(S)_PROXY`，也不读 Windows 系统代�
 | `GET /api/reveal-file?path=...` | 在资源管理器中定位文件 |
 | `GET /api/delete-file?path=...` | 删除文件 |
 | `GET /api/cover?url=...` | 封面代理 |
+| `GET /api/library-cover?path=...` | 读取受管目录内的本地专辑封面 |
+| `GET/POST /api/settings` | 读取 / 保存下载策略与下载根目录 |
+| `GET /api/proxy-test` | 主动测试各代理出口与直连 |
+| `GET /api/search?q=...` | 搜索本地专辑索引与历史 |
+| `GET /api/library?path=...&q=...` | 扫描并筛选本地音频媒体库 |
 
 ## 已知限制
 
-- 站点搜索（`/search.php`）需要验证码，因此未接入搜索功能，只能用分类浏览或专辑 ID 直达。
+- 站点在线搜索（`/search.php`）需要验证码，因此未直接接入；本地搜索只覆盖已浏览 / 打开的专辑索引。
 - 部分集数在 CDN 源头就不存在（`21170` 前 40 集中有 20 集如此，且集中在连续区间），不是抓取方式的问题。这类任务标记为「该集在源站缺失（CDN 无此文件）」，不重试，「全部重试」时也会跳过。详细排查过程见 `../全民听书网.md`。
 - 页面编码历史上从 GBK 变为 UTF-8，当前站点已是 UTF-8。
 - 站点经过 Cloudflare，某些边缘节点（如 AMS/LAX）回源失败会返回 520/521/522。服务端会自动重试 3 次（800/2000/4500ms）；若仍失败，请确认代理配置——直连失败而浏览器正常，几乎都是这个原因。
@@ -86,6 +103,7 @@ qmtsw-audiobook-downloader/
 ├── server.js          # HTTP 服务、站点解析、CDN 下载、任务队列
 ├── package.json
 ├── start.bat
+├── start.sh
 └── public/
     ├── index.html     # 界面结构
     ├── styles.css     # 主题与样式

@@ -13,11 +13,34 @@ const fs = require('fs');
 const path = require('path');
 const dns = require('dns');
 const crypto = require('crypto');
-const { execSync, execFile } = require('child_process');
+const os = require('os');
+const { Transform, pipeline } = require('stream');
+const { promisify } = require('util');
+const { execSync, execFile, execFileSync } = require('child_process');
 
-const PORT = 3211;
+const pipelineAsync = promisify(pipeline);
+const PORT = Number(process.env.QMTSW_PORT) || 3211;
 const SITE = 'https://www.qmtsw.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const DATA_DIR = process.env.QMTSW_DATA_DIR
+  ? path.resolve(process.env.QMTSW_DATA_DIR)
+  : path.join(os.homedir(), '.qmtsw-downloader');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
+const DEFAULT_SETTINGS = {
+  concurrency: 3,
+  speedLimitBps: 0,
+  maxRetries: 2,
+  retryBaseMs: 800,
+  startAt: '',
+  useProxy: true,
+  proxyAddress: '127.0.0.1:7890',
+  downloadRoot: path.join(os.homedir(), 'Downloads'),
+};
+const settings = { ...DEFAULT_SETTINGS };
+const albumIndex = new Map();
+let searchHistory = [];
+let persistTimer = null;
+let nextBandwidthAt = 0;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -42,6 +65,31 @@ const CATEGORIES = {
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 65536) {
+        reject(new Error('请求体过大'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve(text ? JSON.parse(text) : {});
+      } catch (_) {
+        reject(new Error('无效 JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function resolveUserPath(p) {
@@ -78,6 +126,15 @@ function getFreeSpaceBytes(targetDir) {
       return s.bavail * s.bsize;
     }
   } catch (_) { /* ignore */ }
+  if (process.platform !== 'win32') {
+    try {
+      const out = execFileSync('df', ['-kP', targetDir], { timeout: 8000, encoding: 'utf8' });
+      const lines = out.trim().split(/\r?\n/);
+      const parts = lines[lines.length - 1].trim().split(/\s+/);
+      const available = Number(parts[3]);
+      if (Number.isFinite(available)) return available * 1024;
+    } catch (_) { /* ignore */ }
+  }
   try {
     const root = path.parse(path.resolve(targetDir)).root;
     const drive = root.replace(/[\\/:]/g, '');
@@ -131,6 +188,7 @@ function parseProxySpec(raw) {
 }
 
 async function resolveWindowsProxy() {
+  if (process.platform !== 'win32') return null;
   try {
     const out = await runPowerShell(
       "$p = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'\r\n" +
@@ -153,6 +211,7 @@ async function getSiteProxies() {
     return cachedProxies;
   }
   const candidates = [
+    settings.proxyAddress,
     explicit,
     process.env.HTTPS_PROXY || process.env.https_proxy,
     process.env.HTTP_PROXY || process.env.http_proxy,
@@ -196,7 +255,6 @@ function directRequest(targetUrl, opts) {
       path: parsed.pathname + parsed.search,
       method: opts.method || 'GET',
       headers: buildSiteHeaders(opts),
-      rejectUnauthorized: false,
       timeout: REQUEST_TIMEOUT,
     }, (r) => {
       const chunks = [];
@@ -255,7 +313,6 @@ function proxyRequest(targetUrl, opts, proxy) {
         socket,
         agent: false,
         servername: isHttps ? parsed.hostname : undefined,
-        rejectUnauthorized: false,
         timeout: REQUEST_TIMEOUT,
       }, (r2) => {
         const chunks = [];
@@ -278,6 +335,7 @@ function proxyRequest(targetUrl, opts, proxy) {
 }
 
 async function siteRequest(targetUrl, opts) {
+  if (settings.useProxy === false) return directRequest(targetUrl, opts);
   const proxies = await getSiteProxies();
   for (const proxy of proxies) {
     try {
@@ -287,6 +345,70 @@ async function siteRequest(targetUrl, opts) {
     }
   }
   return directRequest(targetUrl, opts);
+}
+
+const coverJobs = new Map();
+
+function findExistingCover(dir) {
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^(cover|folder)\.(jpe?g|png|webp|gif)$/i.test(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      try {
+        if (fs.statSync(full).size > 0) return full;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function ensureAlbumCover(cover, destDir) {
+  if (!cover) return '';
+  const existing = findExistingCover(destDir);
+  if (existing) return existing;
+  const key = path.resolve(destDir);
+  if (coverJobs.has(key)) return coverJobs.get(key);
+  const job = (async () => {
+    const parsed = new URL(String(cover), SITE + '/');
+    if (parsed.origin !== SITE) throw new Error('封面地址不在源站范围内');
+    const r = await siteRequest(parsed.href);
+    if (r.statusCode !== 200) throw new Error(`封面请求返回 ${r.statusCode}`);
+    if (!r.body || !r.body.length) throw new Error('封面内容为空');
+    if (r.body.length > 15 * 1024 * 1024) throw new Error('封面文件过大');
+    const mime = String(r.headers['content-type'] || '').split(';')[0].toLowerCase();
+    if (mime && !mime.startsWith('image/')) throw new Error('封面响应不是图片');
+    const urlExt = path.extname(parsed.pathname).toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+    const ext = mime.includes('png') ? '.png'
+      : mime.includes('webp') ? '.webp'
+        : mime.includes('gif') ? '.gif'
+          : (mime.includes('jpeg') || mime.includes('jpg')) ? '.jpg'
+            : (allowedExts.includes(urlExt) ? urlExt : '.jpg');
+    fs.mkdirSync(destDir, { recursive: true });
+    const completed = findExistingCover(destDir);
+    if (completed) return completed;
+    const target = path.join(destDir, `cover${ext}`);
+    const temp = path.join(destDir, `.cover${ext}.part`);
+    fs.writeFileSync(temp, r.body);
+    try {
+      fs.renameSync(temp, target);
+    } catch (error) {
+      if (fs.existsSync(target) && fs.statSync(target).size === 0) {
+        fs.unlinkSync(target);
+        fs.renameSync(temp, target);
+      } else {
+        throw error;
+      }
+    }
+    return target;
+  })();
+  coverJobs.set(key, job);
+  try {
+    return await job;
+  } finally {
+    if (coverJobs.get(key) === job) coverJobs.delete(key);
+  }
 }
 
 // 5xx 来自 Cloudflare 回源失败。同一时刻不同边缘节点结果可能不同：
@@ -386,17 +508,18 @@ const NODE_SEEDS = {
 
 const speedCache = new Map(); // `${host}|${path}` -> { ip, at }
 
-function cdnHeaders(host) {
+function cdnHeaders(host, extraHeaders) {
   return {
     'Host': host,
     'User-Agent': UA,
     'Referer': SITE + '/',
     'Accept': '*/*',
     'Accept-Encoding': 'identity',
+    ...(extraHeaders || {}),
   };
 }
 
-function cdnConnect(ip, host, reqPath, method, timeout) {
+function cdnConnect(ip, host, reqPath, method, timeout, extraHeaders) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: ip,
@@ -408,7 +531,7 @@ function cdnConnect(ip, host, reqPath, method, timeout) {
       // 关键：CDN 对 TLS 1.3 连接限速到约 50 KB/s，TLS 1.2 能跑满带宽
       minVersion: 'TLSv1.2',
       maxVersion: 'TLSv1.2',
-      headers: cdnHeaders(host),
+      headers: cdnHeaders(host, extraHeaders),
       timeout: timeout || 60000,
     }, (r) => resolve({ req, res: r }));
     req.on('error', reject);
@@ -419,7 +542,7 @@ function cdnConnect(ip, host, reqPath, method, timeout) {
 
 // 连接 CDN 节点 IP，不发 SNI，用 Host 头指明域名。
 // 依次尝试候选节点，首个成功建立连接的即返回。
-async function cdnRequest(audioUrl, method) {
+async function cdnRequest(audioUrl, method, extraHeaders) {
   let parsed;
   try { parsed = new URL(audioUrl); } catch (e) { throw new Error('Bad audio url'); }
   const host = parsed.hostname;
@@ -443,7 +566,7 @@ async function cdnRequest(audioUrl, method) {
   let lastErr = null;
   for (const ip of candidates) {
     try {
-      const { res } = await cdnConnect(ip, host, reqPath, method, 60000);
+      const { res } = await cdnConnect(ip, host, reqPath, method, 60000, extraHeaders);
       // 4xx/5xx 属于文件本身的问题，不必再换节点
       if (res.statusCode >= 400 && res.statusCode < 500) {
         speedCache.set(cacheKey, { ip, at: Date.now() });
@@ -550,7 +673,12 @@ function parsePlayPage(html) {
 async function fetchAlbumChapters(albumId) {
   const { status, text } = await siteGetText(`${SITE}/show/${albumId}.html`);
   if (status !== 200) throw new Error(siteErrorText(status));
-  return parseShowPage(text);
+  const data = parseShowPage(text);
+  rememberAlbums([{
+    id: String(albumId), title: data.title, cover: data.cover, author: data.author,
+    narrator: data.narrator, desc: data.intro, chapterCount: data.chapters.length,
+  }]);
+  return data;
 }
 
 // ---------- 分类列表切页 ----------
@@ -574,6 +702,7 @@ async function getSiteCategoryPage(cat, sitePage) {
   const { status, text } = await siteGetText(url);
   if (status !== 200) throw new Error(siteErrorText(status));
   const data = parseCategoryPage(text, cat);
+  rememberAlbums(data.items.map((item) => ({ ...item, category: Number(cat) })));
 
   const entry = { items: data.items, totalPages: data.totalPages, at: Date.now() };
   categoryPageCache.set(key, entry);
@@ -612,23 +741,155 @@ async function resolveEpisodeAudio(albumId, index, line) {
 // ---------- download tasks ----------
 
 const tasks = new Map();      // taskId -> task
-const taskByKey = new Map();  // albumId:index -> taskId
+const taskByKey = new Map();  // albumId:index:line:destDir -> taskId
 let taskSeq = 0;
+
+function taskKey(task) {
+  return [task.albumId, task.index, task.line || 0, path.resolve(task.destDir || '')].join(':');
+}
+
+function isTaskJobCurrent(task, generation) {
+  return task.generation === generation && task.status !== 'cancelled';
+}
+
+function normalizeSettings(input) {
+  const src = input || {};
+  const out = {};
+  const concurrency = Number(src.concurrency);
+  const speedLimitBps = Number(src.speedLimitBps);
+  const maxRetries = Number(src.maxRetries);
+  const retryBaseMs = Number(src.retryBaseMs);
+  out.concurrency = Number.isFinite(concurrency) ? Math.max(1, Math.min(10, Math.round(concurrency))) : DEFAULT_SETTINGS.concurrency;
+  out.speedLimitBps = Number.isFinite(speedLimitBps) ? Math.max(0, Math.min(104857600, Math.round(speedLimitBps))) : 0;
+  out.maxRetries = Number.isFinite(maxRetries) ? Math.max(0, Math.min(10, Math.round(maxRetries))) : DEFAULT_SETTINGS.maxRetries;
+  out.retryBaseMs = Number.isFinite(retryBaseMs) ? Math.max(100, Math.min(60000, Math.round(retryBaseMs))) : DEFAULT_SETTINGS.retryBaseMs;
+  const startAt = src.startAt ? new Date(src.startAt) : null;
+  out.startAt = startAt && !isNaN(startAt.getTime()) ? startAt.toISOString() : '';
+  out.useProxy = src.useProxy !== false;
+  out.proxyAddress = String(src.proxyAddress == null ? DEFAULT_SETTINGS.proxyAddress : src.proxyAddress).trim().slice(0, 255);
+  out.downloadRoot = src.downloadRoot ? resolveUserPath(String(src.downloadRoot)) : DEFAULT_SETTINGS.downloadRoot;
+  return out;
+}
+
+function throttleBytes(bytes) {
+  const limit = settings.speedLimitBps;
+  if (!limit) return Promise.resolve();
+  const now = Date.now();
+  const wait = Math.max(0, nextBandwidthAt - now);
+  nextBandwidthAt = Math.max(now, nextBandwidthAt) + Math.ceil(bytes * 1000 / limit);
+  return wait > 0 ? new Promise((resolve) => setTimeout(resolve, wait)) : Promise.resolve();
+}
+
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistState();
+  }, 1000);
+  if (persistTimer.unref) persistTimer.unref();
+}
+
+function persistState() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const taskFields = [
+      'id', 'albumId', 'albumTitle', 'index', 'line', 'chapterTitle', 'fileName',
+      'destDir', 'baseName', 'status', 'progress', 'received', 'total', 'error',
+      'filePath', 'partPath', 'speed', 'createdAt', 'startedAt', 'finishedAt', 'size', 'cover',
+    ];
+    const snapshot = {
+      version: 2,
+      settings,
+      searchHistory,
+      albums: [...albumIndex.values()].slice(-10000),
+      tasks: [...tasks.values()].slice(-5000).map((task) => {
+        const out = {};
+        for (const key of taskFields) out[key] = task[key];
+        return out;
+      }),
+    };
+    const tmp = STATE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');
+    try {
+      fs.renameSync(tmp, STATE_FILE);
+    } catch (_) {
+      fs.copyFileSync(tmp, STATE_FILE);
+      fs.unlinkSync(tmp);
+    }
+  } catch (e) {
+    console.error('[state] 保存失败:', e.message);
+  }
+}
+
+function rememberAlbums(items) {
+  for (const item of items || []) {
+    if (!item || !item.id) continue;
+    const id = String(item.id);
+    const previous = albumIndex.get(id) || {};
+    albumIndex.set(id, {
+      ...previous,
+      ...item,
+      id,
+      title: item.title || previous.title || id,
+      indexedAt: Date.now(),
+    });
+  }
+  while (albumIndex.size > 10000) albumIndex.delete(albumIndex.keys().next().value);
+  schedulePersist();
+}
+
+function loadPersistedState() {
+  let data;
+  try {
+    if (!fs.existsSync(STATE_FILE)) return;
+    data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch (e) {
+    console.error('[state] 读取失败:', e.message);
+    return;
+  }
+  Object.assign(settings, normalizeSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) }));
+  searchHistory = Array.isArray(data.searchHistory) ? data.searchHistory.slice(0, 20) : [];
+  for (const item of data.albums || []) {
+    if (item && item.id) albumIndex.set(String(item.id), item);
+  }
+  for (const raw of data.tasks || []) {
+    if (!raw || !Number.isFinite(raw.id)) continue;
+    const task = {
+      progress: 0, received: 0, total: 0, error: '', filePath: '', speed: 0,
+      createdAt: Date.now(), startedAt: 0, finishedAt: 0,
+      ...raw,
+      generation: 0,
+      currentReq: null,
+      _activePromise: null,
+    };
+    if (task.status === 'downloading' || task.status === 'queued') {
+      task.status = 'queued';
+      task.error = '';
+    }
+    tasks.set(task.id, task);
+    taskSeq = Math.max(taskSeq, task.id);
+  }
+  for (const task of [...tasks.values()].sort((a, b) => a.id - b.id)) {
+    taskByKey.set(taskKey(task), task.id);
+  }
+  for (const task of tasks.values()) {
+    if (task.status === 'queued') requeueTask(task);
+  }
+}
 
 function newTask(fields) {
   const id = ++taskSeq;
   const task = {
     id, status: 'queued', progress: 0, received: 0, total: 0,
     error: '', filePath: '', speed: 0, createdAt: Date.now(), startedAt: 0, finishedAt: 0,
+    generation: 0, currentReq: null, _activePromise: null,
     ...fields,
   };
   tasks.set(id, task);
-  taskByKey.set(`${task.albumId}:${task.index}`, id);
+  taskByKey.set(taskKey(task), id);
+  schedulePersist();
   return task;
 }
-
-// 单个文件最多重试的次数（CDN 偶发断流）
-const MAX_RETRIES = 2;
 
 // 单次 /api/tasks 返回的明细条数上限（统计仍按全量计算）
 const MAX_TASKS_IN_LIST = 2000;
@@ -639,148 +900,234 @@ const MAX_TASKS_IN_LIST = 2000;
 function abortTask(task) {
   task.status = 'cancelled';
   task.error = '';
+  task.generation = (task.generation || 0) + 1;
   if (task.currentReq) {
     try { task.currentReq.destroy(new Error('任务已停止')); } catch (_) {}
     task.currentReq = null;
   }
+  schedulePersist();
 }
 
-async function downloadOnce(task, audioUrl, destDir, fileName) {
-  if (task.status === 'cancelled') return;
-  const r = await cdnRequest(audioUrl, 'GET');
-  // 记录底层 socket 所属请求，便于中止
-  task.currentReq = r;
+function markTaskDone(task, filePath, size) {
+  task.progress = 100;
+  task.status = 'done';
+  task.error = '';
+  task.filePath = filePath;
+  task.received = size;
+  task.total = size;
+  task.size = size;
+  task.speed = 0;
+  task.finishedAt = Date.now();
+  schedulePersist();
+}
 
-  if (r.statusCode !== 200) {
-    r.resume();
-    const body = await new Promise((resolve) => {
-      let buf = '';
-      r.on('data', (c) => { if (buf.length < 300) buf += c.toString('utf8'); });
-      r.on('end', () => resolve(buf));
-      r.on('error', () => resolve(buf));
-      setTimeout(() => resolve(buf), 3000);
-    });
-    if (r.statusCode === 404) {
-      // 区分“源头没有这个文件”和别的原因
-      if (/NoSuchKey|The specified key does not exist/i.test(body)) {
-        throw new Error('该集在源站缺失（CDN 无此文件）');
-      }
-      throw new Error('CDN 返回 404');
-    }
-    if (r.statusCode === 403) throw new Error('CDN 返回 403（拒绝访问）');
-    throw new Error(`CDN 返回 ${r.statusCode}`);
-  }
+function resetPartialError(message) {
+  const error = new Error(message);
+  error.resetPartial = true;
+  return error;
+}
 
-  const total = parseInt(r.headers['content-length'] || '0', 10);
-  task.total = total;
-  task.status = 'downloading';
-  task.startedAt = Date.now();
-  task.received = 0;
-  task.progress = 0;
-
+async function downloadOnce(task, audioUrl, destDir, fileName, generation) {
+  if (!isTaskJobCurrent(task, generation)) return;
   if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
   const ext = /\.mp3(\?|$)/i.test(audioUrl) ? '.mp3' : '.m4a';
   const filePath = path.join(destDir, sanitizeName(fileName) + ext);
+  const partPath = filePath + '.part';
   task.filePath = filePath;
+  task.partPath = partPath;
 
-  const free = getFreeSpaceBytes(destDir);
-  if (free != null && total > 0 && free < total) {
-    r.resume();
-    throw new Error(`磁盘空间不足（可用 ${(free / 1048576).toFixed(0)} MB，需要 ${(total / 1048576).toFixed(0)} MB）`);
-  }
-
-  await new Promise((resolve, reject) => {
-    const ws = fs.createWriteStream(filePath);
-    let lastTick = Date.now();
-    let lastBytes = 0;
-    let settled = false;
-    const fail = (err) => {
-      if (settled) return;
-      settled = true;
-      try { ws.destroy(); } catch (_) {}
-      reject(err);
-    };
-
-    r.on('data', (chunk) => {
-      task.received += chunk.length;
-      if (total) task.progress = Math.min(99, Math.round(task.received / total * 100));
-      const now = Date.now();
-      if (now - lastTick >= 500) {
-        task.speed = Math.round((task.received - lastBytes) / ((now - lastTick) / 1000));
-        lastTick = now;
-        lastBytes = task.received;
+  if (fs.existsSync(filePath)) {
+    const size = fs.statSync(filePath).size;
+    if (size > 0) {
+      if (fs.existsSync(partPath)) {
+        try { fs.unlinkSync(partPath); } catch (_) {}
       }
-      // 手动处理背压，避免默认 pipe 的高水位节流
-      if (!ws.write(chunk)) r.pause();
-    });
-    ws.on('drain', () => { if (!settled) r.resume(); });
-    r.on('end', () => {
-      if (settled) return;
-      settled = true;
-      ws.end(() => {
-        task.progress = 100;
-        task.status = 'done';
-        task.finishedAt = Date.now();
-        task.size = task.received;
-        resolve();
+      markTaskDone(task, filePath, size);
+      return;
+    }
+  }
+  if (fs.existsSync(filePath) && fs.statSync(filePath).size === 0) fs.unlinkSync(filePath);
+
+  let resumeFrom = fs.existsSync(partPath) ? fs.statSync(partPath).size : 0;
+  const r = await cdnRequest(audioUrl, 'GET', resumeFrom > 0 ? { Range: `bytes=${resumeFrom}-` } : null);
+  if (!isTaskJobCurrent(task, generation)) {
+    r.resume();
+    return;
+  }
+  task.currentReq = r;
+  try {
+    if (r.statusCode === 416 && resumeFrom > 0) {
+      const match = /bytes \*\/(\d+)/.exec(r.headers['content-range'] || '');
+      r.resume();
+      if (match && Number(match[1]) === resumeFrom) {
+        fs.renameSync(partPath, filePath);
+        markTaskDone(task, filePath, resumeFrom);
+        return;
+      }
+    }
+
+    if (![200, 206].includes(r.statusCode)) {
+      r.resume();
+      const body = await new Promise((resolve) => {
+        let buf = '';
+        r.on('data', (c) => { if (buf.length < 500) buf += c.toString('utf8'); });
+        r.on('end', () => resolve(buf));
+        r.on('error', () => resolve(buf));
+        const timer = setTimeout(() => resolve(buf), 3000);
+        if (timer.unref) timer.unref();
       });
+      if (r.statusCode === 404) {
+        if (/NoSuchKey|The specified key does not exist/i.test(body)) {
+          throw new Error('该集在源站缺失（CDN 无此文件）');
+        }
+        throw new Error('CDN 返回 404');
+      }
+      if (r.statusCode === 403) throw new Error('CDN 返回 403（拒绝访问）');
+      throw new Error(`CDN 返回 ${r.statusCode}`);
+    }
+
+    let append = false;
+    let total = parseInt(r.headers['content-length'] || '0', 10);
+    if (resumeFrom > 0 && r.statusCode === 206) {
+      const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(r.headers['content-range'] || '');
+      if (!range || Number(range[1]) !== resumeFrom) {
+        r.resume();
+        throw resetPartialError('CDN 返回了不匹配的续传范围，将重新下载');
+      }
+      append = true;
+      total = range[3] === '*' ? resumeFrom + total : Number(range[3]);
+    } else {
+      if (r.statusCode !== 200) {
+        r.resume();
+        throw resetPartialError('CDN 未按预期响应，将重新下载');
+      }
+      resumeFrom = 0;
+    }
+
+    task.total = total;
+    task.status = 'downloading';
+    task.startedAt = task.startedAt || Date.now();
+    task.received = resumeFrom;
+    task.progress = total ? Math.min(99, Math.round(resumeFrom / total * 100)) : 0;
+    task.error = '';
+    schedulePersist();
+
+    const remaining = Math.max(0, total - resumeFrom);
+    const free = getFreeSpaceBytes(destDir);
+    if (free != null && remaining > 0 && free < remaining) {
+      r.resume();
+      throw new Error(`磁盘空间不足（可用 ${(free / 1048576).toFixed(0)} MB，需要 ${(remaining / 1048576).toFixed(0)} MB）`);
+    }
+
+    const hash = crypto.createHash('md5');
+    let lastTick = Date.now();
+    let lastBytes = resumeFrom;
+    const meter = new Transform({
+      transform(chunk, _encoding, callback) {
+        if (!isTaskJobCurrent(task, generation)) return callback(new Error('任务已停止'));
+        throttleBytes(chunk.length).then(() => {
+          if (!isTaskJobCurrent(task, generation)) return callback(new Error('任务已停止'));
+          task.received += chunk.length;
+          if (!append) hash.update(chunk);
+          if (total) task.progress = Math.min(99, Math.round(task.received / total * 100));
+          const now = Date.now();
+          if (now - lastTick >= 500) {
+            task.speed = Math.round((task.received - lastBytes) / ((now - lastTick) / 1000));
+            lastTick = now;
+            lastBytes = task.received;
+            schedulePersist();
+          }
+          callback(null, chunk);
+        }).catch(callback);
+      },
     });
-    r.on('error', (e) => {
-      try { r.destroy(); } catch (_) {}
-      fail(new Error('传输中断: ' + e.message));
-    });
-    // 对端静默断开（只触发 close）时兜底，避免 Promise 永不结算
-    r.on('close', () => {
-      if (!settled) fail(new Error('连接被中断'));
-    });
-    ws.on('error', (e) => {
-      try { r.destroy(); } catch (_) {}
-      fail(e);
-    });
-  });
+    const ws = fs.createWriteStream(partPath, { flags: append ? 'a' : 'w' });
+    await pipelineAsync(r, meter, ws);
+    if (!isTaskJobCurrent(task, generation)) return;
+    if (total > 0 && task.received !== total) {
+      throw resetPartialError(`文件长度校验失败（${task.received}/${total}），将重新下载`);
+    }
+    const expectedMd5 = String(r.headers['x-cos-meta-md5'] || '').trim();
+    if (!append && /^[a-f0-9]{32}$/i.test(expectedMd5)) {
+      const actualMd5 = hash.digest('hex');
+      if (actualMd5.toLowerCase() !== expectedMd5.toLowerCase()) {
+        throw resetPartialError('文件 MD5 校验失败，将重新下载');
+      }
+    }
+    fs.renameSync(partPath, filePath);
+    markTaskDone(task, filePath, task.received);
+  } finally {
+    if (task.currentReq === r) task.currentReq = null;
+  }
 }
 
-async function runDownload(task, audioUrl, destDir, fileName) {
+async function runDownload(task, audioUrl, destDir, fileName, generation) {
   let lastErr = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (task.status === 'cancelled') return;
+  for (let attempt = 0; attempt <= settings.maxRetries; attempt++) {
+    if (!isTaskJobCurrent(task, generation)) return;
     try {
-      await downloadOnce(task, audioUrl, destDir, fileName);
-      if (task.status === 'cancelled') return;
+      await downloadOnce(task, audioUrl, destDir, fileName, generation);
       return;
     } catch (e) {
       lastErr = e;
-      if (task.status === 'cancelled') return;
-      // 源站缺失、403、磁盘空间不足都不值得重试
+      if (!isTaskJobCurrent(task, generation)) return;
+      if (e.resetPartial && task.partPath) {
+        try { fs.unlinkSync(task.partPath); } catch (_) {}
+      }
       if (/源站缺失|403|磁盘空间/.test(e.message)) break;
-      if (attempt < MAX_RETRIES) {
+      if (attempt < settings.maxRetries) {
         task.status = 'queued';
-        task.error = `重试中 (${attempt + 1}/${MAX_RETRIES})`;
-        await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+        task.error = `重试中 (${attempt + 1}/${settings.maxRetries})`;
+        schedulePersist();
+        await new Promise((resolve) => setTimeout(resolve, settings.retryBaseMs * Math.pow(2, attempt)));
       }
     }
   }
-  if (task.status === 'cancelled') return;
+  if (!isTaskJobCurrent(task, generation)) return;
   task.status = 'error';
   task.error = lastErr ? lastErr.message : 'unknown error';
   task.finishedAt = Date.now();
+  schedulePersist();
 }
 
-// 下载队列：并发 CONCURRENCY 路，兼顾速度与 CDN 友好度
-let CONCURRENCY = 3;
+// 下载队列：并发数与计划开始时间均可配置
 let activeCount = 0;
 const queue = [];
+let queueTimer = null;
+let queueTimerAt = 0;
 
 function enqueue(job) { queue.push(job); pumpQueue(); }
 
 async function pumpQueue() {
-  while (activeCount < CONCURRENCY && queue.length) {
+  const startAt = settings.startAt ? new Date(settings.startAt).getTime() : 0;
+  const wait = startAt ? startAt - Date.now() : 0;
+  if (wait > 0) {
+    const target = Date.now() + wait;
+    if (queueTimer && queueTimerAt !== target) {
+      clearTimeout(queueTimer);
+      queueTimer = null;
+      queueTimerAt = 0;
+    }
+    if (!queueTimer) {
+      queueTimerAt = target;
+      queueTimer = setTimeout(() => { queueTimer = null; queueTimerAt = 0; pumpQueue(); }, Math.min(wait, 2147483647));
+      if (queueTimer.unref) queueTimer.unref();
+    }
+    return;
+  }
+  if (queueTimer) {
+    clearTimeout(queueTimer);
+    queueTimer = null;
+    queueTimerAt = 0;
+  }
+  while (activeCount < settings.concurrency && queue.length) {
     const job = queue.shift();
     activeCount++;
     (async () => {
       try { await job(); } catch (_) { /* task 内部已记录错误 */ }
       finally {
         activeCount--;
+        schedulePersist();
         pumpQueue();
       }
     })();
@@ -794,20 +1141,42 @@ function clearQueue() {
 
 // 把任务重新放回队列执行
 function requeueTask(task) {
+  const generation = (task.generation || 0) + 1;
+  task.generation = generation;
   const job = async () => {
-    if (task.status === 'cancelled') return;
-    try {
-      const audioUrl = await resolveEpisodeAudio(task.albumId, task.index, task.line || 0);
-      await runDownload(task, audioUrl, task.destDir, task.baseName);
-    } catch (e) {
-      if (task.status !== 'cancelled') {
-        task.status = 'error';
-        task.error = e.message;
-        task.finishedAt = Date.now();
+    if (!isTaskJobCurrent(task, generation)) return;
+    if (task._activePromise) {
+      try { await task._activePromise; } catch (_) {}
+    }
+    if (!isTaskJobCurrent(task, generation)) return;
+    const run = (async () => {
+      try {
+        if (task.cover) {
+          ensureAlbumCover(task.cover, task.destDir).catch((error) => {
+            console.log(`[cover] ${task.albumTitle || task.albumId}: ${error.message}`);
+          });
+        }
+        const audioUrl = await resolveEpisodeAudio(task.albumId, task.index, task.line || 0);
+        if (!isTaskJobCurrent(task, generation)) return;
+        await runDownload(task, audioUrl, task.destDir, task.baseName, generation);
+      } catch (e) {
+        if (isTaskJobCurrent(task, generation)) {
+          task.status = 'error';
+          task.error = e.message;
+          task.finishedAt = Date.now();
+        }
       }
+    })();
+    task._activePromise = run;
+    try {
+      await run;
+    } finally {
+      if (task._activePromise === run) task._activePromise = null;
+      schedulePersist();
     }
   };
   enqueue(job);
+  schedulePersist();
 }
 
 // 停止所有任务（排队 + 进行中）
@@ -842,6 +1211,111 @@ function retryAllTasks() {
   return { retried, skipped };
 }
 
+function isPathInside(root, target) {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return !!relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+}
+
+function isManagedFile(filePath) {
+  const roots = [settings.downloadRoot];
+  for (const task of tasks.values()) if (task.destDir) roots.push(task.destDir);
+  return roots.some((root) => root && isPathInside(root, filePath));
+}
+
+async function scanLibrary(root, query) {
+  const items = [];
+  const needle = String(query || '').trim().toLowerCase();
+  let truncated = false;
+  async function walk(dir, depth, inheritedCover) {
+    if (items.length >= 5000 || depth > 5) {
+      truncated = true;
+      return;
+    }
+    let entries;
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    const coverEntry = entries.find((entry) => entry.isFile() && /^(cover|folder)\.(jpe?g|png|webp|gif)$/i.test(entry.name));
+    const currentCover = coverEntry ? path.join(dir, coverEntry.name) : (inheritedCover || '');
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1, currentCover);
+        continue;
+      }
+      if (!entry.isFile() || !/\.(m4a|mp3)$/i.test(entry.name)) continue;
+      if (needle && !full.toLowerCase().includes(needle)) continue;
+      try {
+        const stat = await fs.promises.stat(full);
+        items.push({
+          path: full,
+          name: entry.name,
+          album: path.basename(path.dirname(full)),
+          relativePath: path.relative(root, full),
+          cover: currentCover,
+          size: stat.size,
+          mtime: stat.mtimeMs,
+        });
+      } catch (_) {}
+      if (items.length >= 5000) {
+        truncated = true;
+        break;
+      }
+    }
+  }
+  await walk(root, 0, '');
+  items.sort((a, b) => b.mtime - a.mtime);
+  return { items, total: items.length, truncated };
+}
+
+function execFileText(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 15000, windowsHide: true, encoding: 'utf8', ...(options || {}) }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+async function openFileCrossPlatform(filePath) {
+  if (process.platform === 'win32') {
+    return runPowerShell(`Start-Process -FilePath '${filePath.replace(/'/g, "''")}'`);
+  }
+  if (process.platform === 'darwin') return execFileText('open', [filePath]);
+  return execFileText('xdg-open', [filePath]);
+}
+
+async function revealFileCrossPlatform(filePath) {
+  if (process.platform === 'win32') {
+    return runPowerShell(`Start-Process explorer.exe -ArgumentList '/select,"${filePath.replace(/'/g, "''")}"'`);
+  }
+  if (process.platform === 'darwin') return execFileText('open', ['-R', filePath]);
+  return execFileText('xdg-open', [path.dirname(filePath)]);
+}
+
+async function chooseFolderNonWindows() {
+  if (process.platform === 'darwin') {
+    try {
+      return await execFileText('osascript', ['-e', 'POSIX path of (choose folder with prompt "选择保存目录")']);
+    } catch (error) {
+      if (/User canceled|用户已取消|(-128)/.test(error.message)) return '';
+      throw error;
+    }
+  }
+  try {
+    return await execFileText('zenity', ['--file-selection', '--directory', '--title=选择保存目录']);
+  } catch (firstError) {
+    try {
+      return await execFileText('kdialog', ['--getexistingdirectory', os.homedir()]);
+    } catch (_) {
+      throw new Error('无法打开系统目录选择框，请手动输入路径');
+    }
+  }
+}
+
 // ---------- server ----------
 
 const server = http.createServer(async (req, res) => {
@@ -855,6 +1329,99 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   try {
+    // --- 下载策略与运行状态 ---
+    if (p === '/api/settings') {
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const previousLimit = settings.speedLimitBps;
+        const previousProxyAddress = settings.proxyAddress;
+        Object.assign(settings, normalizeSettings({ ...settings, ...body }));
+        if (previousLimit !== settings.speedLimitBps) nextBandwidthAt = 0;
+        if (previousProxyAddress !== settings.proxyAddress) cachedProxies = undefined;
+        schedulePersist();
+        pumpQueue();
+      }
+      return sendJson(res, 200, {
+        settings: { ...settings },
+        platform: process.platform,
+        dataDir: DATA_DIR,
+        activeCount,
+        queuedCount: queue.length,
+      });
+    }
+
+    // --- 代理与直连连通性诊断（仅用户主动触发） ---
+    if (p === '/api/proxy-test') {
+      const proxies = await getSiteProxies();
+      async function probe(label, request) {
+        const started = Date.now();
+        try {
+          const response = await request();
+          return {
+            label, status: response.statusCode, ok: response.statusCode < 500,
+            elapsedMs: Date.now() - started,
+          };
+        } catch (error) {
+          return { label, ok: false, error: error.message, elapsedMs: Date.now() - started };
+        }
+      }
+      const jobs = proxies.map((proxy) => () => probe(
+        `代理 ${proxy.host}:${proxy.port}`,
+        () => proxyRequest(SITE + '/', {}, proxy),
+      ));
+      jobs.push(() => probe('直连', () => directRequest(SITE + '/', {})));
+      const results = [];
+      for (const job of jobs) results.push(await job());
+      return sendJson(res, 200, { results });
+    }
+
+    // --- 本地专辑索引与搜索历史 ---
+    if (p === '/api/search') {
+      const q = String(query.q || '').trim();
+      if (q) {
+        searchHistory = [q, ...searchHistory.filter((item) => item !== q)].slice(0, 20);
+        schedulePersist();
+      }
+      const needle = q.toLowerCase();
+      const matched = [...albumIndex.values()].filter((item) => {
+        if (!needle) return true;
+        return [item.id, item.title, item.author, item.narrator, item.desc]
+          .some((value) => String(value || '').toLowerCase().includes(needle));
+      }).sort((a, b) => (b.indexedAt || 0) - (a.indexedAt || 0));
+      return sendJson(res, 200, {
+        items: matched.slice(0, 100), total: matched.length,
+        indexed: albumIndex.size, history: searchHistory,
+      });
+    }
+
+    // --- 受管目录内的本地封面 ---
+    if (p === '/api/library-cover') {
+      const filePath = resolveUserPath(query.path || '');
+      if (!filePath || !isManagedFile(filePath) || !/\.(jpe?g|png|webp|gif)$/i.test(filePath)) {
+        return sendJson(res, 400, { error: '无效封面路径' });
+      }
+      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        return sendJson(res, 404, { error: '封面不存在' });
+      }
+      const ext = path.extname(filePath).toLowerCase();
+      const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp'
+        : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+      res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' });
+      return fs.createReadStream(filePath).on('error', () => res.destroy()).pipe(res);
+    }
+
+    // --- 本地音频媒体库 ---
+    if (p === '/api/library') {
+      const root = resolveUserPath(query.path || settings.downloadRoot);
+      if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+        return sendJson(res, 400, { error: '媒体库目录不存在' });
+      }
+      settings.downloadRoot = root;
+      schedulePersist();
+      const result = await scanLibrary(root, query.q);
+      return sendJson(res, 200, { ...result, root });
+    }
+
     // --- 分类列表 ---
     if (p === '/api/categories') {
       const out = Object.entries(CATEGORIES).map(([id, name]) => ({ id: Number(id), name }));
@@ -915,35 +1482,46 @@ const server = http.createServer(async (req, res) => {
         const album = await fetchAlbumChapters(id);
         if (!album.title) return sendJson(res, 404, { error: '专辑不存在' });
         const dir = path.join(savePath, sanitizeName(album.title));
+        settings.downloadRoot = savePath;
         const from = query.from != null ? parseInt(query.from, 10) : 0;
         const to = query.to != null ? parseInt(query.to, 10) : album.chapters.length - 1;
+        const selected = query.indexes
+          ? new Set(String(query.indexes).split(',').map((n) => parseInt(n, 10)).filter(Number.isFinite))
+          : null;
         let created = 0;
         for (const ch of album.chapters) {
+          if (selected && !selected.has(ch.index)) continue;
           if (ch.index < from || ch.index > to) continue;
-          const key = `${id}:${ch.index}`;
+          const line = parseInt(ch.line, 10) || 0;
+          const key = taskKey({ albumId: id, index: ch.index, line, destDir: dir });
           const existing = taskByKey.get(key);
-          if (existing && tasks.get(existing) && ['queued', 'downloading', 'done'].includes(tasks.get(existing).status)) continue;
+          const old = existing && tasks.get(existing);
+          if (old) {
+            if (['queued', 'downloading'].includes(old.status)
+              || (old.status === 'done' && old.filePath && fs.existsSync(old.filePath))) continue;
+            old.status = 'queued';
+            old.error = '';
+            old.progress = 0;
+            old.received = 0;
+            old.speed = 0;
+            old.startedAt = 0;
+            old.finishedAt = 0;
+            old.cover = album.cover || old.cover || '';
+            requeueTask(old);
+            created++;
+            continue;
+          }
           const fileName = `${String(ch.index + 1).padStart(4, '0')} ${ch.title}`;
           const task = newTask({
             albumId: id, albumTitle: album.title, index: ch.index,
             chapterTitle: ch.title, fileName,
-            line: parseInt(ch.line, 10) || 0,
-            destDir: dir, baseName: fileName,
+            line,
+            destDir: dir, baseName: fileName, cover: album.cover || '',
           });
           created++;
-          enqueue(async () => {
-            if (task.status === 'cancelled') return;
-            try {
-              const audioUrl = await resolveEpisodeAudio(id, ch.index, ch.line);
-              await runDownload(task, audioUrl, dir, fileName);
-            } catch (e) {
-              if (task.status !== 'cancelled') {
-                task.status = 'error';
-                task.error = e.message;
-              }
-            }
-          });
+          requeueTask(task);
         }
+        schedulePersist();
         return sendJson(res, 200, { queued: created, albumTitle: album.title, dir });
       }
 
@@ -952,34 +1530,35 @@ const server = http.createServer(async (req, res) => {
       const line = parseInt(query.line, 10) || 0;
       const chapterTitle = query.title || `第${index + 1}集`;
       if (isNaN(index)) return sendJson(res, 400, { error: '缺少集序号' });
-      const key = `${id}:${index}`;
-      const existingId = taskByKey.get(key);
-      if (existingId) {
-        const t = tasks.get(existingId);
-        if (t && ['queued', 'downloading', 'done'].includes(t.status)) {
-          return sendJson(res, 200, { taskId: t.id, reused: true });
-        }
-      }
       const albumTitle = query.album || id;
       const dir = path.join(savePath, sanitizeName(albumTitle));
+      settings.downloadRoot = savePath;
+      const key = taskKey({ albumId: id, index, line, destDir: dir });
+      const existingId = taskByKey.get(key);
+      const old = existingId && tasks.get(existingId);
+      if (old) {
+        if (!['queued', 'downloading'].includes(old.status)
+          && !(old.status === 'done' && old.filePath && fs.existsSync(old.filePath))) {
+          old.status = 'queued';
+          old.error = '';
+          old.progress = 0;
+          old.received = 0;
+          old.speed = 0;
+          old.startedAt = 0;
+          old.finishedAt = 0;
+          old.cover = query.cover || old.cover || '';
+          requeueTask(old);
+        }
+        return sendJson(res, 200, { taskId: old.id, reused: true });
+      }
       const fileName = `${String(index + 1).padStart(4, '0')} ${chapterTitle}`;
       const task = newTask({
         albumId: id, albumTitle: albumTitle, index,
         chapterTitle, fileName,
-        line, destDir: dir, baseName: fileName,
+        line, destDir: dir, baseName: fileName, cover: query.cover || '',
       });
-      enqueue(async () => {
-        if (task.status === 'cancelled') return;
-        try {
-          const audioUrl = await resolveEpisodeAudio(id, index, line);
-          await runDownload(task, audioUrl, dir, fileName);
-        } catch (e) {
-          if (task.status !== 'cancelled') {
-            task.status = 'error';
-            task.error = e.message;
-          }
-        }
-      });
+      requeueTask(task);
+      schedulePersist();
       return sendJson(res, 200, { taskId: task.id, filePath: task.filePath });
     }
 
@@ -1045,6 +1624,7 @@ const server = http.createServer(async (req, res) => {
       t.progress = 0;
       t.received = 0;
       t.speed = 0;
+      t.startedAt = 0;
       t.finishedAt = 0;
       requeueTask(t);
       return sendJson(res, 200, { success: true });
@@ -1055,9 +1635,11 @@ const server = http.createServer(async (req, res) => {
       for (const [id, t] of [...tasks]) {
         if (t.status !== 'downloading' && t.status !== 'queued') {
           tasks.delete(id);
-          taskByKey.delete(`${t.albumId}:${t.index}`);
+          const key = taskKey(t);
+          if (taskByKey.get(key) === id) taskByKey.delete(key);
         }
       }
+      schedulePersist();
       return sendJson(res, 200, { success: true });
     }
 
@@ -1066,6 +1648,10 @@ const server = http.createServer(async (req, res) => {
     // 若用 execSync，整个 Node 事件循环会被冻结，页面轮询全部停摆，
     // 看起来就像“点了没反应”。
     if (p === '/api/browse-folder') {
+      if (process.platform !== 'win32') {
+        const result = await chooseFolderNonWindows();
+        return sendJson(res, 200, { path: result || null });
+      }
       const tmpFile = path.join(require('os').tmpdir(),
         `qmtsw_browse_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
       // 建一个不可见的置顶 owner 窗口，确保对话框显示在浏览器窗口之上
@@ -1108,21 +1694,23 @@ $owner.Close()
     if (p === '/api/open-file') {
       const filePath = resolveUserPath(query.path || '');
       if (!filePath || !fs.existsSync(filePath)) return sendJson(res, 404, { error: '文件不存在' });
-      await runPowerShell(`Start-Process -FilePath '${filePath.replace(/'/g, "''")}'`);
+      await openFileCrossPlatform(filePath);
       return sendJson(res, 200, { success: true });
     }
 
     if (p === '/api/reveal-file') {
       const filePath = resolveUserPath(query.path || '');
       if (!filePath || !fs.existsSync(filePath)) return sendJson(res, 404, { error: '文件不存在' });
-      await runPowerShell(`Start-Process explorer.exe -ArgumentList '/select,"${filePath.replace(/'/g, "''")}"'`);
+      await revealFileCrossPlatform(filePath);
       return sendJson(res, 200, { success: true });
     }
 
     if (p === '/api/delete-file') {
       const filePath = resolveUserPath(query.path || '');
       if (!filePath || !fs.existsSync(filePath)) return sendJson(res, 404, { error: '文件不存在' });
+      if (!isManagedFile(filePath)) return sendJson(res, 403, { error: '只能删除下载目录或任务登记目录中的文件' });
       fs.unlinkSync(filePath);
+      schedulePersist();
       return sendJson(res, 200, { success: true });
     }
 
@@ -1160,6 +1748,10 @@ $owner.Close()
 
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
+    if (process.platform !== 'win32') {
+      console.error(`Port ${PORT} is already in use. Set QMTSW_PORT to use another port.`);
+      process.exit(1);
+    }
     console.error(`Port ${PORT} is already in use. Trying to kill existing process...`);
     try {
       const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr "LISTENING"`, { encoding: 'utf8' });
@@ -1183,6 +1775,10 @@ server.on('error', (e) => {
     process.exit(1);
   }
 });
+
+loadPersistedState();
+process.on('SIGINT', () => { persistState(); process.exit(0); });
+process.on('SIGTERM', () => { persistState(); process.exit(0); });
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Server running at http://localhost:${PORT}`);

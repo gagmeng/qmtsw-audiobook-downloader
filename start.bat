@@ -1,6 +1,7 @@
 @echo off
 cd /d "%~dp0"
 title QMTSW Audio Downloader Web
+if not defined QMTSW_PORT set QMTSW_PORT=3211
 
 echo ============================================
 echo   QMTSW Audio Downloader - Web Edition
@@ -15,11 +16,11 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo Starting server at http://localhost:3211
+echo Starting server at http://localhost:%QMTSW_PORT%
 echo.
 
 echo Opening browser...
-start http://localhost:3211
+start http://localhost:%QMTSW_PORT%
 node server.js
 
 pause
