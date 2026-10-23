@@ -2,9 +2,9 @@
 // QMTSW Audio Downloader - Web Edition
 // Source site: https://www.qmtsw.com (全民听书网)
 //
-// 站内页面直连即可访问；音频 CDN (xmcdn.com) 会在 TLS 握手阶段
-// 按 SNI 重置连接，因此下载时用节点 IP 连接、置空 SNI、改由 Host
-// 头指定域名（Node 的 servername:'' 才真正不发 SNI）。
+// 站内页面走 HTTP 代理（环境变量或 Windows 系统代理），音频 CDN
+// (xmcdn.com) 则在 TLS 握手阶段按 SNI 重置连接，因此下载时用节点 IP
+// 连接、置空 SNI、改由 Host 头指定域名（Node 的 servername:'' 才真正不发 SNI）。
 // ============================================================
 
 const http = require('http');
@@ -105,25 +105,97 @@ function sanitizeName(name) {
 
 const REQUEST_TIMEOUT = 30000;
 
-function siteRequest(targetUrl, opts) {
+// Node 的 http/https 不会自动读取 HTTP(S)_PROXY，也不读 Windows 系统代理。
+// 部分网络下直连 Cloudflare 会被调度到 AMS/LAX 节点并回源失败（520），
+// 经本机代理走 NRT 等节点则正常，所以这里显式支持代理。
+let cachedProxies; // undefined = 尚未检测，数组 = 按优先级排列的候选代理（可能为空）
+
+function parseProxySpec(raw) {
+  if (!raw) return null;
+  let spec = String(raw).trim();
+  if (!spec || /^(none|off|direct|0)$/i.test(spec)) return null;
+  // Windows 注册表形式：http=host:port;https=host:port
+  if (spec.includes('=')) {
+    const parts = {};
+    for (const seg of spec.split(';')) {
+      const i = seg.indexOf('=');
+      if (i > 0) parts[seg.slice(0, i).trim().toLowerCase()] = seg.slice(i + 1).trim();
+    }
+    spec = parts.https || parts.http || parts.socks || '';
+    if (!spec) return null;
+  }
+  spec = spec.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '');
+  const m = spec.match(/^\[?([^\]]+?)\]?:(\d+)$/);
+  if (!m) return null;
+  return { host: m[1], port: Number(m[2]) };
+}
+
+async function resolveWindowsProxy() {
+  try {
+    const out = await runPowerShell(
+      "$p = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'\r\n" +
+      "if ($p.ProxyEnable -eq 1 -and $p.ProxyServer) { Write-Output $p.ProxyServer }"
+    );
+    return parseProxySpec(out);
+  } catch (_) {
+    return null;
+  }
+}
+
+// 候选代理按优先级排列：显式配置优先，其后依次是环境变量与系统代理。
+// 长连接下代理可能偶发 TLS 断连，保留多个候选便于切换。
+async function getSiteProxies() {
+  if (cachedProxies !== undefined) return cachedProxies;
+  const explicit = process.env.QMTSW_PROXY;
+  if (explicit && /^(none|off|direct|0)$/i.test(explicit.trim())) {
+    cachedProxies = [];
+    console.log('[proxy] QMTSW_PROXY 已禁用代理，站点请求直连');
+    return cachedProxies;
+  }
+  const candidates = [
+    explicit,
+    process.env.HTTPS_PROXY || process.env.https_proxy,
+    process.env.HTTP_PROXY || process.env.http_proxy,
+  ];
+  const list = [];
+  for (const raw of candidates) {
+    const p = parseProxySpec(raw);
+    if (p && !list.some((x) => x.host === p.host && x.port === p.port)) list.push(p);
+  }
+  const sys = await resolveWindowsProxy();
+  if (sys && !list.some((x) => x.host === sys.host && x.port === sys.port)) list.push(sys);
+
+  cachedProxies = list;
+  if (list.length) {
+    console.log('[proxy] 站点请求代理候选：' + list.map((p) => `${p.host}:${p.port}`).join(' → '));
+  } else {
+    console.log('[proxy] 未配置代理，站点请求直连');
+  }
+  return cachedProxies;
+}
+
+function buildSiteHeaders(opts) {
+  return {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    'Referer': SITE + '/',
+    ...((opts && opts.headers) || {}),
+  };
+}
+
+function directRequest(targetUrl, opts) {
   opts = opts || {};
   return new Promise((resolve, reject) => {
     const parsed = new URL(targetUrl);
     const isHttps = parsed.protocol === 'https:';
     const lib = isHttps ? https : http;
-    const headers = {
-      'User-Agent': UA,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9',
-      'Referer': SITE + '/',
-      ...(opts.headers || {}),
-    };
     const req = lib.request({
       hostname: parsed.hostname,
       port: parsed.port || (isHttps ? 443 : 80),
       path: parsed.pathname + parsed.search,
       method: opts.method || 'GET',
-      headers,
+      headers: buildSiteHeaders(opts),
       rejectUnauthorized: false,
       timeout: REQUEST_TIMEOUT,
     }, (r) => {
@@ -142,8 +214,83 @@ function siteRequest(targetUrl, opts) {
   });
 }
 
-// 站点侧的 5xx 多为 Cloudflare 回源失败（520/521/522/523/524），
-// 源站恢复的瞬间可能仍在返回这些码，重试几次能明显提升成功率。
+// 经 HTTP 代理用 CONNECT 建立隧道后再请求；只在隧道建立失败时才回退直连，
+// 隧道内的 HTTP 5xx 是站点真实响应，照常返回给上层处理。
+function proxyRequest(targetUrl, opts, proxy) {
+  opts = opts || {};
+  const parsed = new URL(targetUrl);
+  const isHttps = parsed.protocol === 'https:';
+  const port = parsed.port || (isHttps ? 443 : 80);
+  const authority = `${parsed.hostname}:${port}`;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    const connectReq = http.request({
+      host: proxy.host,
+      port: proxy.port,
+      method: 'CONNECT',
+      path: authority,
+      headers: { Host: authority },
+      timeout: REQUEST_TIMEOUT,
+    });
+
+    connectReq.on('connect', (r, socket) => {
+      if (r.statusCode !== 200) {
+        socket.destroy();
+        return fail(new Error(`代理 CONNECT 返回 ${r.statusCode}`));
+      }
+      const lib = isHttps ? https : http;
+      const req = lib.request({
+        hostname: parsed.hostname,
+        port,
+        path: parsed.pathname + parsed.search,
+        method: opts.method || 'GET',
+        headers: buildSiteHeaders(opts),
+        socket,
+        agent: false,
+        servername: isHttps ? parsed.hostname : undefined,
+        rejectUnauthorized: false,
+        timeout: REQUEST_TIMEOUT,
+      }, (r2) => {
+        const chunks = [];
+        r2.on('data', (c) => chunks.push(c));
+        r2.on('end', () => {
+          settled = true;
+          resolve({ statusCode: r2.statusCode, headers: r2.headers, body: Buffer.concat(chunks) });
+        });
+      });
+      req.on('error', fail);
+      req.on('timeout', () => req.destroy(new Error('Request timeout')));
+      if (opts.body) req.write(opts.body);
+      req.end();
+    });
+
+    connectReq.on('error', fail);
+    connectReq.on('timeout', () => connectReq.destroy(new Error('代理连接超时')));
+    connectReq.end();
+  });
+}
+
+async function siteRequest(targetUrl, opts) {
+  const proxies = await getSiteProxies();
+  for (const proxy of proxies) {
+    try {
+      return await proxyRequest(targetUrl, opts, proxy);
+    } catch (e) {
+      console.log(`[proxy] ${proxy.host}:${proxy.port} 请求失败（${e.message}），尝试下一个出口`);
+    }
+  }
+  return directRequest(targetUrl, opts);
+}
+
+// 5xx 来自 Cloudflare 回源失败。同一时刻不同边缘节点结果可能不同：
+// 直连常被调度到 AMS/LAX 并失败，走代理到 NRT 等节点则正常，因此重试有意义。
 const SITE_MAX_RETRIES = 3;       // 最多额外重试 3 次
 const SITE_RETRY_DELAYS = [800, 2000, 4500];
 
@@ -154,17 +301,21 @@ function isSiteUnavailable(status) {
 // 把状态码翻译成用户能看懂的原因
 function siteErrorText(status) {
   const map = {
-    520: '源站暂时不可用（Cloudflare 520：源站返回了无法识别的响应）',
-    521: '源站暂时不可用（Cloudflare 521：源站拒绝连接）',
-    522: '源站暂时不可用（Cloudflare 522：连接源站超时）',
-    523: '源站暂时不可用（Cloudflare 523：源站不可达）',
-    524: '源站暂时不可用（Cloudflare 524：源站响应超时）',
-    525: '源站暂时不可用（Cloudflare 525：TLS 握手失败）',
-    526: '源站暂时不可用（Cloudflare 526：证书无效）',
-    530: '源站暂时不可用（Cloudflare 530）',
-    444: '站点拒绝连接（Cloudflare 444）',
+    520: 'Cloudflare 520：源站返回了无法识别的响应',
+    521: 'Cloudflare 521：源站拒绝连接',
+    522: 'Cloudflare 522：连接源站超时',
+    523: 'Cloudflare 523：源站不可达',
+    524: 'Cloudflare 524：源站响应超时',
+    525: 'Cloudflare 525：TLS 握手失败',
+    526: 'Cloudflare 526：证书无效',
+    530: 'Cloudflare 530',
+    444: 'Cloudflare 444：站点拒绝连接',
   };
-  if (map[status]) return `${map[status]}，通常是 qmtsw.com 服务器故障，请稍后重试`;
+  if (map[status]) {
+    return `站点暂时无法访问（${map[status]}）。` +
+      '若浏览器能正常打开，说明本机直连被 Cloudflare 调度到了故障节点，' +
+      '请配置代理后重试（支持 QMTSW_PROXY 或系统代理）';
+  }
   if (status === 404) return '页面不存在（404）';
   if (status === 403) return '访问被拒绝（403）';
   return `站点返回 ${status}`;
@@ -1037,4 +1188,5 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`Server running at http://localhost:${PORT}`);
   console.log('Source: https://www.qmtsw.com');
   console.log('Audio CDN access: IP + Host header, SNI disabled');
+  getSiteProxies().catch(() => {});
 });
