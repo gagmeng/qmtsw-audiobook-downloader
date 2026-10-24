@@ -1037,6 +1037,55 @@ body {
   gap: 12px;
 }
 
+.download-album-group, .download-album-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.download-album-items[hidden] { display: none; }
+
+.download-album-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.download-album-header:hover { border-color: var(--accent-primary); }
+
+.download-album-chevron { flex-shrink: 0; transition: transform var(--transition); }
+.download-album-header[aria-expanded="false"] .download-album-chevron { transform: rotate(-90deg); }
+
+.download-album-title {
+  flex: 1;
+  min-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.download-album-summary {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .download-album-summary { width: 100%; margin-left: 28px; white-space: normal; }
+}
+
 .download-item {
   display: flex;
   align-items: center;

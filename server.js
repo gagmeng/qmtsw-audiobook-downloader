@@ -519,18 +519,19 @@ function cdnHeaders(host, extraHeaders) {
   };
 }
 
-function cdnConnect(ip, host, reqPath, method, timeout, extraHeaders) {
+function cdnConnect(ip, host, reqPath, method, timeout, extraHeaders, protocol, port) {
   return new Promise((resolve, reject) => {
-    const req = https.request({
+    const isHttps = protocol !== 'http:';
+    const req = (isHttps ? https : http).request({
       hostname: ip,
-      port: 443,
+      port: port || (isHttps ? 443 : 80),
       path: reqPath,
       method: method || 'GET',
-      servername: '',            // 关键：不发 SNI，绕开域名阻断
-      rejectUnauthorized: false,
+      servername: isHttps ? '' : undefined, // HTTPS 不发 SNI，绕开域名阻断
+      rejectUnauthorized: isHttps ? false : undefined,
       // 关键：CDN 对 TLS 1.3 连接限速到约 50 KB/s，TLS 1.2 能跑满带宽
-      minVersion: 'TLSv1.2',
-      maxVersion: 'TLSv1.2',
+      minVersion: isHttps ? 'TLSv1.2' : undefined,
+      maxVersion: isHttps ? 'TLSv1.2' : undefined,
       headers: cdnHeaders(host, extraHeaders),
       timeout: timeout || 60000,
     }, (r) => resolve({ req, res: r }));
@@ -545,8 +546,10 @@ function cdnConnect(ip, host, reqPath, method, timeout, extraHeaders) {
 async function cdnRequest(audioUrl, method, extraHeaders) {
   let parsed;
   try { parsed = new URL(audioUrl); } catch (e) { throw new Error('Bad audio url'); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Unsupported audio protocol');
   const host = parsed.hostname;
   const reqPath = parsed.pathname + parsed.search;
+  const port = Number(parsed.port) || 0;
 
   let ips = [];
   try {
@@ -557,27 +560,35 @@ async function cdnRequest(audioUrl, method, extraHeaders) {
   if (!ips.length) throw new Error(`CDN DNS 解析失败: ${host}`);
 
   // 优先用上次成功的节点
-  const cacheKey = `${host}|${reqPath}`;
+  const cacheKey = `${parsed.protocol}|${host}|${reqPath}`;
   const cached = speedCache.get(cacheKey);
   const candidates = [];
   if (cached && Date.now() - cached.at < 600000) candidates.push(cached.ip);
   for (const ip of ips) if (!candidates.includes(ip)) candidates.push(ip);
 
   let lastErr = null;
-  for (const ip of candidates) {
-    try {
-      const { res } = await cdnConnect(ip, host, reqPath, method, 60000, extraHeaders);
-      // 4xx/5xx 属于文件本身的问题，不必再换节点
-      if (res.statusCode >= 400 && res.statusCode < 500) {
+  for (let round = 0; round < 2; round++) {
+    for (const ip of candidates) {
+      try {
+        const { res } = await cdnConnect(ip, host, reqPath, method, 60000, extraHeaders, parsed.protocol, port);
+        // 4xx 属于文件本身的问题，不必再换节点
+        if (res.statusCode >= 400 && res.statusCode < 500) {
+          speedCache.set(cacheKey, { ip, at: Date.now() });
+          return res;
+        }
         speedCache.set(cacheKey, { ip, at: Date.now() });
         return res;
+      } catch (e) {
+        lastErr = e;
+        const cachedNode = speedCache.get(cacheKey);
+        if (cachedNode && cachedNode.ip === ip) speedCache.delete(cacheKey);
       }
-      speedCache.set(cacheKey, { ip, at: Date.now() });
-      return res;
-    } catch (e) {
-      lastErr = e;
     }
+    if (round === 0) await new Promise((resolve) => setTimeout(resolve, 300));
   }
+  // 外层下载重试应重新解析 DNS，且不再优先选择本轮失败的节点。
+  dnsCache.delete(host);
+  speedCache.delete(cacheKey);
   throw new Error(`CDN 连接失败: ${lastErr ? lastErr.message : 'unknown'}`);
 }
 
@@ -727,6 +738,150 @@ async function getCategorySlice(cat, page, perPage) {
   const entries = await Promise.all(pages.map((i) => getSiteCategoryPage(cat, i)));
   const all = entries.flatMap((e) => e.items);
   return { items: all.slice(start, end), totalItems };
+}
+
+const SITE_SEARCH_CACHE_TTL = 6 * 60 * 60 * 1000;
+const siteSearchCache = { at: 0, items: [], promise: null };
+
+function parseSiteSearchRss(text) {
+  const items = [];
+  const readField = (block, tag) => {
+    const open = `<${tag}>`;
+    const at = block.indexOf(open);
+    if (at < 0) return '';
+    const start = at + open.length;
+    const end = block.indexOf(`</${tag}>`, start);
+    if (end < 0) return '';
+    let value = block.slice(start, end).trim();
+    if (value.startsWith('<![CDATA[') && value.endsWith(']]>')) value = value.slice(9, -3);
+    return decodeHtml(value.trim());
+  };
+  let cursor = 0;
+  while (cursor < text.length) {
+    const itemAt = text.indexOf('<item>', cursor);
+    if (itemAt < 0) break;
+    const itemEnd = text.indexOf('</item>', itemAt + 6);
+    if (itemEnd < 0) break;
+    const block = text.slice(itemAt + 6, itemEnd);
+    const link = readField(block, 'link');
+    const showAt = link.indexOf('/show/');
+    const idStart = showAt + 6;
+    const idEnd = showAt < 0 ? -1 : link.indexOf('.html', idStart);
+    const id = idEnd > idStart ? link.slice(idStart, idEnd) : '';
+    const title = readField(block, 'title');
+    if (!id || !/^[0-9]+$/.test(id) || !title) {
+      cursor = itemEnd + 7;
+      continue;
+    }
+    items.push({
+      id, title,
+      author: readField(block, 'author'),
+      description: readField(block, 'description'),
+      pubDate: readField(block, 'pubDate'),
+    });
+    cursor = itemEnd + 7;
+  }
+  return items;
+}
+
+async function getSiteSearchIndex() {
+  if (siteSearchCache.items.length && Date.now() - siteSearchCache.at < SITE_SEARCH_CACHE_TTL) {
+    return siteSearchCache.items;
+  }
+  if (siteSearchCache.promise) return siteSearchCache.promise;
+  const promise = (async () => {
+    const { status, text } = await siteGetText(`${SITE}/xml/rss.xml`);
+    if (status !== 200) throw new Error(siteErrorText(status));
+    const items = parseSiteSearchRss(text);
+    if (!items.length) throw new Error('站点专辑索引为空或格式已变化');
+    siteSearchCache.items = items;
+    siteSearchCache.at = Date.now();
+    return items;
+  })();
+  siteSearchCache.promise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (siteSearchCache.promise === promise) siteSearchCache.promise = null;
+  }
+}
+
+async function searchSiteAlbums(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return { items: [], total: 0, indexed: siteSearchCache.items.length };
+  const terms = q.split(/\s+/).filter(Boolean);
+  const source = await getSiteSearchIndex();
+  const matched = [];
+  for (const item of source) {
+    const title = item.title.toLowerCase();
+    const author = item.author.toLowerCase();
+    const description = item.description.toLowerCase();
+    const haystack = `${title} ${author} ${description}`;
+    if (!terms.every((term) => haystack.includes(term))) continue;
+    let score = 0;
+    for (const term of terms) {
+      if (title === term) score += 100;
+      else if (title.startsWith(term)) score += 80;
+      else if (title.includes(term)) score += 60;
+      else if (author.includes(term)) score += 30;
+      else score += 10;
+    }
+    matched.push({ item, score });
+  }
+  matched.sort((a, b) => b.score - a.score);
+  const items = matched.slice(0, 60).map(({ item }) => {
+    const cached = albumIndex.get(item.id);
+    return {
+      id: item.id, title: item.title, author: item.author, pubDate: item.pubDate,
+      cover: cached && cached.cover ? cached.cover : '',
+      category: cached ? cached.category : null,
+    };
+  });
+  return { items, total: matched.length, indexed: source.length };
+}
+
+const siteCoverJobs = new Map();
+
+async function getSiteAlbumCover(id) {
+  const cached = albumIndex.get(id);
+  if (cached && cached.cover) return cached.cover;
+  if (siteCoverJobs.has(id)) return siteCoverJobs.get(id);
+  const job = (async () => {
+    const { status, text } = await siteGetText(`${SITE}/show/${id}.html`);
+    if (status !== 200) throw new Error(siteErrorText(status));
+    const data = parseShowPage(text);
+    if (!data.cover) return '';
+    rememberAlbums([{
+      id, title: data.title, cover: data.cover, author: data.author,
+      narrator: data.narrator, desc: data.intro,
+    }]);
+    return data.cover;
+  })();
+  siteCoverJobs.set(id, job);
+  try {
+    return await job;
+  } finally {
+    if (siteCoverJobs.get(id) === job) siteCoverJobs.delete(id);
+  }
+}
+
+async function getSiteCovers(ids) {
+  const list = [...new Set(String(ids || '').split(',').map((id) => id.replace(/\D/g, '')).filter(Boolean))].slice(0, 60);
+  const covers = {};
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(6, list.length) }, async () => {
+    while (cursor < list.length) {
+      const id = list[cursor++];
+      try {
+        const cover = await getSiteAlbumCover(id);
+        if (cover) covers[id] = cover;
+      } catch (e) {
+        console.log(`[cover] 搜索封面 ${id}: ${e.message}`);
+      }
+    }
+  });
+  await Promise.all(workers);
+  return covers;
 }
 
 async function resolveEpisodeAudio(albumId, index, line) {
@@ -1335,9 +1490,10 @@ const server = http.createServer(async (req, res) => {
         const body = await readJsonBody(req);
         const previousLimit = settings.speedLimitBps;
         const previousProxyAddress = settings.proxyAddress;
+        const previousUseProxy = settings.useProxy;
         Object.assign(settings, normalizeSettings({ ...settings, ...body }));
         if (previousLimit !== settings.speedLimitBps) nextBandwidthAt = 0;
-        if (previousProxyAddress !== settings.proxyAddress) cachedProxies = undefined;
+        if (previousProxyAddress !== settings.proxyAddress || previousUseProxy !== settings.useProxy) cachedProxies = undefined;
         schedulePersist();
         pumpQueue();
       }
@@ -1373,6 +1529,15 @@ const server = http.createServer(async (req, res) => {
       const results = [];
       for (const job of jobs) results.push(await job());
       return sendJson(res, 200, { results });
+    }
+
+    // --- 全站专辑关键词搜索（RSS 索引，不使用需要验证码的 search.php） ---
+    if (p === '/api/site-covers') {
+      return sendJson(res, 200, { covers: await getSiteCovers(query.ids) });
+    }
+
+    if (p === '/api/site-search') {
+      return sendJson(res, 200, await searchSiteAlbums(query.q));
     }
 
     // --- 本地专辑索引与搜索历史 ---
@@ -1630,17 +1795,27 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true });
     }
 
-    // --- 清理已完成/失败任务 ---
+    // --- 清理任务：finished 兼容旧调用；done/error/all 供精确清理 ---
     if (p === '/api/clear-tasks') {
+      const scope = String(query.scope || 'finished');
+      if (!['finished', 'done', 'error', 'all'].includes(scope)) {
+        return sendJson(res, 400, { error: '无效清理范围' });
+      }
+      const stopped = scope === 'all' ? stopAllTasks() : 0;
+      let removed = 0;
       for (const [id, t] of [...tasks]) {
-        if (t.status !== 'downloading' && t.status !== 'queued') {
-          tasks.delete(id);
-          const key = taskKey(t);
-          if (taskByKey.get(key) === id) taskByKey.delete(key);
-        }
+        const matched = scope === 'all'
+          || (scope === 'done' && t.status === 'done')
+          || (scope === 'error' && t.status === 'error')
+          || (scope === 'finished' && t.status !== 'downloading' && t.status !== 'queued');
+        if (!matched) continue;
+        tasks.delete(id);
+        const key = taskKey(t);
+        if (taskByKey.get(key) === id) taskByKey.delete(key);
+        removed++;
       }
       schedulePersist();
-      return sendJson(res, 200, { success: true });
+      return sendJson(res, 200, { success: true, removed, stopped });
     }
 
     // --- 文件系统操作 ---

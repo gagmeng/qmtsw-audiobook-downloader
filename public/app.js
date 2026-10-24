@@ -21,7 +21,9 @@ const I18N = {
     noResults: '没有找到结果',
     downloadsTitle: '下载管理',
     clearAll: '清空已完成',
+    clearAllTasks: '全部清除', clearFailed: '清除失败项',
     noDownloads: '暂无下载任务',
+    downloadItems: '个下载项', expandAlbum: '展开专辑', collapseAlbum: '折叠专辑',
     bookmarksTitle: '收藏列表',
     noBookmarks: '暂无收藏',
     settingsTitle: '设置',
@@ -51,6 +53,9 @@ const I18N = {
     loadFailed: '加载失败',
     networkError: '网络错误',
     confirmClear: '确定要清空已完成的任务吗？',
+    confirmClearFailed: '确定要清除所有失败任务吗？',
+    confirmClearAll: '确定要停止并清除全部下载任务吗？仅清除记录，不删除已下载文件。',
+    clearedTasks: '已清除 {n} 项任务', noTasksToClear: '没有可清除的任务',
     confirmDelete: '确定要删除这个文件吗？',
     speed: '速度', remaining: '剩余',
     totalTasks: '总任务', activeTasks: '进行中', doneTasks: '已完成', errorTasks: '失败',
@@ -69,6 +74,7 @@ const I18N = {
     refresh: '刷新', noLibrary: '未找到音频文件',
     libraryAlbums: '个专辑', libraryFiles: '个文件', viewChapters: '查看章节', collapseChapters: '收起章节',
     tabSearch: '本地搜索', localSearch: '搜索', localSearchPlaceholder: '搜索已浏览或打开的专辑...',
+    tabSiteSearch: '全站搜索', siteSearchPlaceholder: '输入关键词搜索全站专辑...', siteSearchLoading: '首次搜索需加载全站专辑索引，请稍候...',
     selectAll: '全选', invertSelection: '反选', selectPending: '未下载/失败',
     downloadSelected: '下载所选', exportIssues: '导出失败清单', noSelection: '请先选择章节',
     noIssues: '没有可导出的失败记录', newChapters: '{n} 个新章节',
@@ -94,7 +100,9 @@ const I18N = {
     noResults: 'No results found',
     downloadsTitle: 'Downloads',
     clearAll: 'Clear Finished',
+    clearAllTasks: 'Clear All', clearFailed: 'Clear Failed',
     noDownloads: 'No download tasks',
+    downloadItems: 'items', expandAlbum: 'Expand album', collapseAlbum: 'Collapse album',
     bookmarksTitle: 'Bookmarks',
     noBookmarks: 'No bookmarks',
     settingsTitle: 'Settings',
@@ -124,6 +132,9 @@ const I18N = {
     loadFailed: 'Failed to load',
     networkError: 'Network error',
     confirmClear: 'Clear all finished tasks?',
+    confirmClearFailed: 'Clear all failed tasks?',
+    confirmClearAll: 'Stop and clear all download tasks? Only records are removed; downloaded files are kept.',
+    clearedTasks: 'Cleared {n} tasks', noTasksToClear: 'No tasks to clear',
     confirmDelete: 'Delete this file?',
     speed: 'Speed', remaining: 'Remaining',
     totalTasks: 'Total', activeTasks: 'Active', doneTasks: 'Done', errorTasks: 'Failed',
@@ -142,6 +153,7 @@ const I18N = {
     refresh: 'Refresh', noLibrary: 'No audio files found',
     libraryAlbums: 'albums', libraryFiles: 'files', viewChapters: 'View chapters', collapseChapters: 'Hide chapters',
     tabSearch: 'Local Search', localSearch: 'Search', localSearchPlaceholder: 'Search browsed or opened albums...',
+    tabSiteSearch: 'Site Search', siteSearchPlaceholder: 'Search all site albums by keyword...', siteSearchLoading: 'Loading the site album index for the first search...',
     selectAll: 'Select All', invertSelection: 'Invert', selectPending: 'Pending / Failed',
     downloadSelected: 'Download Selected', exportIssues: 'Export Failures', noSelection: 'Select chapters first',
     noIssues: 'No failures to export', newChapters: '{n} new chapter(s)',
@@ -253,6 +265,7 @@ function setLang(lang) {
   $('#langSelect').value = lang;
   applyI18n();
   renderResults();
+  taskView.order = '';
   renderTasks();
   renderBookmarks();
   if (state.currentAlbum && $('#detailModal').style.display !== 'none') {
@@ -337,9 +350,9 @@ function renderResults() {
   }
 
   container.innerHTML = state.results.map((item) => {
-    const catName = state.pageMode === 'search'
-      ? CATEGORY_NAMES[item.category] || t('tabSearch')
-      : CATEGORY_NAMES[state.category] || '';
+    const catName = state.pageMode === 'category'
+      ? CATEGORY_NAMES[state.category] || ''
+      : CATEGORY_NAMES[item.category] || (state.pageMode === 'site-search' ? t('tabSiteSearch') : t('tabSearch'));
     const isBm = state.bookmarks.some((b) => b.id === item.id);
     return `<div class="result-card" data-id="${escapeHtml(item.id)}">
       <div class="card-cover">
@@ -689,7 +702,7 @@ function statusText(task) {
 }
 
 // 增量渲染状态：id 顺序 + 每行的内容签名
-const taskView = { order: '', sigs: new Map() };
+const taskView = { order: '', sigs: new Map(), groupSigs: new Map(), collapsed: new Set() };
 
 // 抓住所有会影响这一行外观的字段
 function taskSignature(task) {
@@ -748,6 +761,52 @@ function taskRowHtml(task) {
   </div>`;
 }
 
+function groupDownloadTasks() {
+  const groups = new Map();
+  for (const task of state.tasks) {
+    const key = String(task.albumId || 'unknown');
+    if (!groups.has(key)) groups.set(key, { key, title: task.albumTitle || `ID ${key}`, tasks: [] });
+    const group = groups.get(key);
+    group.tasks.push(task);
+    if (task.albumTitle) group.title = task.albumTitle;
+  }
+  return [...groups.values()];
+}
+
+function albumGroupSummary(group) {
+  const active = group.tasks.filter((task) => task.status === 'queued' || task.status === 'downloading').length;
+  const done = group.tasks.filter((task) => task.status === 'done').length;
+  const error = group.tasks.filter((task) => task.status === 'error').length;
+  const parts = [`${group.tasks.length} ${t('downloadItems')}`];
+  if (active) parts.push(`${active} ${t('activeTasks')}`);
+  if (done) parts.push(`${done} ${t('doneTasks')}`);
+  if (error) parts.push(`${error} ${t('errorTasks')}`);
+  return parts.join(' · ');
+}
+
+function albumGroupHeaderHtml(group) {
+  const collapsed = taskView.collapsed.has(group.key);
+  return `<button type="button" class="download-album-header" data-act="toggle-album" data-album-key="${escapeHtml(group.key)}" data-album-header aria-expanded="${!collapsed}" aria-controls="album-items-${escapeHtml(group.key)}" aria-label="${escapeHtml(`${collapsed ? t('expandAlbum') : t('collapseAlbum')} ${group.title}`)}">
+    <svg class="download-album-chevron" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    <span class="download-album-title">${escapeHtml(group.title)}</span>
+    <span class="download-album-summary">${escapeHtml(albumGroupSummary(group))}</span>
+  </button>`;
+}
+
+function albumGroupHtml(group) {
+  const collapsed = taskView.collapsed.has(group.key);
+  return `<section class="download-album-group" data-album-group="${escapeHtml(group.key)}">
+    ${albumGroupHeaderHtml(group)}
+    <div class="download-album-items" id="album-items-${escapeHtml(group.key)}" ${collapsed ? 'hidden' : ''}>
+      ${collapsed ? '' : group.tasks.map(taskRowHtml).join('')}
+    </div>
+  </section>`;
+}
+
+function albumGroupSignature(group) {
+  return [group.title, ...group.tasks.map((task) => task.status)].join('\u0001');
+}
+
 function renderTaskStats(stats) {
   const statsEl = $('#downloadStats');
   if (!state.tasks.length) { statsEl.innerHTML = ''; return; }
@@ -785,34 +844,65 @@ function renderTasks() {
     </div>`;
     taskView.order = '';
     taskView.sigs.clear();
+    taskView.groupSigs.clear();
     renderTaskStats();
     return;
   }
 
   renderTaskStats(state.stats);
 
-  const order = state.tasks.map((x) => x.id).join(',');
+  const groups = groupDownloadTasks();
+  const order = groups.map((group) => `${group.key}:${group.tasks.map((task) => task.id).join(',')}`).join('|');
   if (order !== taskView.order) {
-    // 任务增删或顺序变化 —— 整表重建
-    container.innerHTML = state.tasks.map(taskRowHtml).join('');
+    // 任务、分组或顺序变化 —— 整表重建，折叠状态保留
+    container.innerHTML = groups.map(albumGroupHtml).join('');
     taskView.order = order;
     taskView.sigs.clear();
-    for (const task of state.tasks) taskView.sigs.set(task.id, taskSignature(task));
+    taskView.groupSigs.clear();
+    for (const group of groups) {
+      taskView.groupSigs.set(group.key, albumGroupSignature(group));
+      if (!taskView.collapsed.has(group.key)) {
+        for (const task of group.tasks) taskView.sigs.set(task.id, taskSignature(task));
+      }
+    }
     return;
   }
 
-  // 顺序不变 —— 只替换内容有变化的行，其余保持原 DOM
-  for (const task of state.tasks) {
-    const sig = taskSignature(task);
-    if (taskView.sigs.get(task.id) === sig) continue;
-    const el = container.querySelector(`[data-task-id="${task.id}"]`);
-    if (!el) continue;
-    const tmp = document.createElement('div');
-    tmp.innerHTML = taskRowHtml(task);
-    const next = tmp.firstElementChild;
-    if (next) el.replaceWith(next);
-    taskView.sigs.set(task.id, sig);
+  // 顺序不变 —— 只替换有变化的组头和可见行，其余保持原 DOM
+  for (const group of groups) {
+    const groupSig = albumGroupSignature(group);
+    if (taskView.groupSigs.get(group.key) !== groupSig) {
+      const header = container.querySelector(`[data-album-key="${group.key}"]`);
+      if (header) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = albumGroupHeaderHtml(group);
+        if (tmp.firstElementChild) header.replaceWith(tmp.firstElementChild);
+      }
+      taskView.groupSigs.set(group.key, groupSig);
+    }
+    for (const task of group.tasks) {
+      const sig = taskSignature(task);
+      if (taskView.sigs.get(task.id) === sig) continue;
+      const el = container.querySelector(`[data-task-id="${task.id}"]`);
+      if (!el) continue;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = taskRowHtml(task);
+      const next = tmp.firstElementChild;
+      if (next) el.replaceWith(next);
+      taskView.sigs.set(task.id, sig);
+    }
   }
+}
+
+async function clearTasksByScope(scope, confirmationKey) {
+  if (!confirm(t(confirmationKey))) return;
+  try {
+    const data = await api('/api/clear-tasks', { scope });
+    taskView.order = '';
+    if (data.removed) showToast(t('clearedTasks').replace('{n}', data.removed));
+    else showToast(t('noTasksToClear'));
+    refreshTasks();
+  } catch (e) { showToast(e.message); }
 }
 
 // ---------------- bookmarks ----------------
@@ -898,11 +988,12 @@ function updateBadges() {
 
 async function localSearch() {
   const query = $('#localSearchInput').value.trim();
-  state.categoryRequestSeq++;
+  const requestSeq = ++state.categoryRequestSeq;
   state.pageMode = 'search';
   showLoading(t('loading'));
   try {
     const data = await api('/api/search', { q: query });
+    if (requestSeq !== state.categoryRequestSeq) return;
     state.results = data.items || [];
     renderResults();
     const history = $('#searchHistory');
@@ -913,9 +1004,58 @@ async function localSearch() {
       localSearch();
     }));
   } catch (e) {
+    if (requestSeq !== state.categoryRequestSeq) return;
     showToast(`${t('loadFailed')}: ${e.message}`);
   } finally {
+    if (requestSeq === state.categoryRequestSeq) hideLoading();
+  }
+}
+
+async function siteSearch() {
+  const query = $('#siteSearchInput').value.trim();
+  const requestSeq = ++state.categoryRequestSeq;
+  state.pageMode = 'site-search';
+  if (!query) {
+    state.results = [];
+    renderResults();
     hideLoading();
+    return;
+  }
+  showLoading(t('siteSearchLoading'));
+  try {
+    const data = await api('/api/site-search', { q: query });
+    if (requestSeq !== state.categoryRequestSeq) return;
+    state.results = data.items || [];
+    renderResults();
+    loadSiteSearchCovers(requestSeq);
+  } catch (e) {
+    if (requestSeq !== state.categoryRequestSeq) return;
+    showToast(`${t('loadFailed')}: ${e.message}`);
+  } finally {
+    if (requestSeq === state.categoryRequestSeq) hideLoading();
+  }
+}
+
+async function loadSiteSearchCovers(requestSeq) {
+  const ids = state.results.filter((item) => !item.cover).map((item) => item.id).slice(0, 60);
+  if (!ids.length) return;
+  for (let offset = 0; offset < ids.length; offset += 12) {
+    try {
+      const batch = ids.slice(offset, offset + 12);
+      const data = await api('/api/site-covers', { ids: batch.join(',') });
+      if (requestSeq !== state.categoryRequestSeq || state.pageMode !== 'site-search') return;
+      let changed = false;
+      for (const item of state.results) {
+        const cover = data.covers && data.covers[item.id];
+        if (cover && !item.cover) {
+          item.cover = cover;
+          changed = true;
+        }
+      }
+      if (changed) renderResults();
+    } catch (e) {
+      console.warn(`搜索封面加载失败: ${e.message}`);
+    }
   }
 }
 
@@ -1161,8 +1301,10 @@ function bindEvents() {
       state.pageMode = tab.dataset.tab;
       $('#categoryTabs').style.display = state.pageMode === 'category' ? 'flex' : 'none';
       $('#localSearchBar').style.display = state.pageMode === 'search' ? 'flex' : 'none';
+      $('#siteSearchBar').style.display = state.pageMode === 'site-search' ? 'flex' : 'none';
       if (state.pageMode === 'category') loadCategory(state.category, state.page);
       else if (state.pageMode === 'search') localSearch();
+      else if (state.pageMode === 'site-search') siteSearch();
       else {
         state.categoryRequestSeq++;
         $('#pagination').style.display = 'none';
@@ -1173,6 +1315,10 @@ function bindEvents() {
   $('#localSearchBtn').addEventListener('click', localSearch);
   $('#localSearchInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') localSearch();
+  });
+  $('#siteSearchBtn').addEventListener('click', siteSearch);
+  $('#siteSearchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') siteSearch();
   });
 
   $('#librarySearchBtn').addEventListener('click', loadLibrary);
@@ -1249,7 +1395,13 @@ function bindEvents() {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
-    if (act === 'open' || act === 'reveal') {
+    if (act === 'toggle-album') {
+      const key = btn.dataset.albumKey;
+      if (taskView.collapsed.has(key)) taskView.collapsed.delete(key);
+      else taskView.collapsed.add(key);
+      taskView.order = '';
+      renderTasks();
+    } else if (act === 'open' || act === 'reveal') {
       try {
         await api(act === 'open' ? '/api/open-file' : '/api/reveal-file', { path: btn.dataset.path });
       } catch (err) { showToast(err.message); }
@@ -1267,14 +1419,9 @@ function bindEvents() {
     }
   });
 
-  $('#clearDownloads').addEventListener('click', async () => {
-    if (!confirm(t('confirmClear'))) return;
-    try {
-      await api('/api/clear-tasks');
-      taskView.order = '';
-      refreshTasks();
-    } catch (e) { showToast(e.message); }
-  });
+  $('#clearDownloads').addEventListener('click', () => clearTasksByScope('done', 'confirmClear'));
+  $('#clearFailedDownloads').addEventListener('click', () => clearTasksByScope('error', 'confirmClearFailed'));
+  $('#clearAllDownloads').addEventListener('click', () => clearTasksByScope('all', 'confirmClearAll'));
 
   $('#stopAllDownloads').addEventListener('click', async () => {
     if (!confirm(t('confirmStopAll'))) return;
@@ -1344,6 +1491,20 @@ function bindEvents() {
 
   $('#saveStrategyBtn').addEventListener('click', saveStrategySettings);
   $('#proxyTestBtn').addEventListener('click', testProxyConnections);
+  $('#useProxyInput').addEventListener('change', async (e) => {
+    const input = e.target;
+    const next = input.checked;
+    input.disabled = true;
+    try {
+      await saveServerSettings({ useProxy: next });
+      showToast(t('toastSaved'));
+    } catch (error) {
+      input.checked = !next;
+      showToast(error.message);
+    } finally {
+      input.disabled = false;
+    }
+  });
   $('#autoUpdateInput').addEventListener('change', (e) => {
     state.autoUpdate = e.target.checked;
     localStorage.setItem('autoUpdate', state.autoUpdate ? '1' : '0');

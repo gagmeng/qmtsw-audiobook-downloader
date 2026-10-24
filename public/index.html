@@ -114,11 +114,16 @@
         <div class="search-tabs">
           <button class="tab active" data-tab="category" data-i18n="tabCategory">分类浏览</button>
           <button class="tab" data-tab="album" data-i18n="tabAlbum">专辑直达</button>
+          <button class="tab" data-tab="site-search" data-i18n="tabSiteSearch">全站搜索</button>
           <button class="tab" data-tab="search" data-i18n="tabSearch">本地搜索</button>
         </div>
         <div class="search-bar local-search-bar" id="localSearchBar" style="display:none">
           <input type="text" id="localSearchInput" data-i18n-ph="localSearchPlaceholder" placeholder="搜索已浏览或打开的专辑..." autocomplete="off">
           <button class="btn-search" id="localSearchBtn" data-i18n="localSearch">搜索</button>
+        </div>
+        <div class="search-bar local-search-bar" id="siteSearchBar" style="display:none">
+          <input type="text" id="siteSearchInput" data-i18n-ph="siteSearchPlaceholder" placeholder="输入关键词搜索全站专辑..." autocomplete="off">
+          <button class="btn-search" id="siteSearchBtn" data-i18n="localSearch">搜索</button>
         </div>
         <div class="search-history" id="searchHistory"></div>
         <div class="category-tabs" id="categoryTabs">
@@ -196,6 +201,8 @@
           <button class="btn-secondary btn-danger" id="stopAllDownloads" data-i18n="stopAll">全部停止</button>
           <button class="btn-secondary" id="retryAllDownloads" data-i18n="retryAll">全部重试</button>
           <button class="btn-secondary" id="clearDownloads" data-i18n="clearAll">清空已完成</button>
+          <button class="btn-secondary" id="clearFailedDownloads" data-i18n="clearFailed">清除失败项</button>
+          <button class="btn-secondary btn-danger" id="clearAllDownloads" data-i18n="clearAllTasks">全部清除</button>
         </div>
       </div>
       <div class="download-stats" id="downloadStats"></div>
@@ -352,7 +359,7 @@
           </div>
           <div class="setting-info">
             <span class="setting-label" data-i18n="about">关于</span>
-            <span class="setting-desc">QMTSW Audio Downloader v1.1.0 · qmtsw.com</span>
+            <span class="setting-desc">QMTSW Audio Downloader v1.2.0 · qmtsw.com</span>
           </div>
         </div>
       </div>
