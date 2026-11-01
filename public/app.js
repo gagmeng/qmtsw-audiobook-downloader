@@ -13,7 +13,7 @@ const I18N = {
     browseTitle: '浏览有声书',
     albumPlaceholder: '输入专辑ID或专辑链接，例如 21170...',
     openAlbum: '打开专辑',
-    tabCategory: '分类浏览', tabAlbum: '专辑直达',
+    tabCategory: '分类浏览',
     emptyHint: '选择一个分类开始浏览，或直接输入专辑ID',
     prev: '上一页', next: '下一页', jumpTo: '跳至', pageUnit: '页', go: 'Go',
     perPageLabel: '每页', perPageUnit: '条',
@@ -85,6 +85,17 @@ const I18N = {
     retryBase: '重试基础延迟（毫秒）', scheduledStart: '队列计划开始时间',
     saveStrategy: '保存下载策略', strategySaved: '下载策略已保存',
     proxyTest: '测试代理与直连', proxyTesting: '正在测试连通性...', useProxy: '使用代理（如已配置）', proxyAddress: '代理地址（host:port）',
+    play: '试听', eta: '剩余', notifyAllDone: '全部下载任务已完成',
+    nothingQueued: '没有可下载的章节（可能已完成、已取消或范围无效）',
+    invalidRange: '下载范围无效：起点不能大于终点',
+    filterAll: '全部状态', taskSearchPlaceholder: '按专辑或章节名过滤...', noMatchTasks: '没有匹配的任务',
+    removeTask: '移除', confirmRemoveActive: '该任务正在进行中，移除将停止下载。确定移除吗？',
+    libraryTruncated: '结果较多，仅显示前 5000 条', themeAuto: '跟随系统',
+    loadMoreChapters: '显示更多章节',
+    cat_1: '玄幻', cat_2: '言情', cat_3: '都市', cat_4: '恐怖', cat_5: '惊悚', cat_6: '推理',
+    cat_7: '武侠', cat_8: '历史', cat_9: '军事', cat_10: '穿越', cat_11: '科幻', cat_12: '网游',
+    cat_13: '评书', cat_14: '戏曲', cat_15: '笑话', cat_16: '儿童', cat_17: '财经', cat_18: '广播',
+    cat_19: '诗歌', cat_20: '文学', cat_21: '粤语', cat_22: '经典', cat_23: '相声小品', cat_24: '百家讲坛',
   },
   en: {
     appTitle: 'QMTSW Audio Downloader',
@@ -92,7 +103,7 @@ const I18N = {
     browseTitle: 'Browse Audiobooks',
     albumPlaceholder: 'Enter album ID or URL, e.g. 21170...',
     openAlbum: 'Open Album',
-    tabCategory: 'Categories', tabAlbum: 'Direct Link',
+    tabCategory: 'Categories',
     emptyHint: 'Pick a category to browse, or enter an album ID',
     prev: 'Prev', next: 'Next', jumpTo: 'Go to', pageUnit: '', go: 'Go',
     perPageLabel: 'Per page', perPageUnit: 'items',
@@ -164,6 +175,17 @@ const I18N = {
     retryBase: 'Base retry delay (ms)', scheduledStart: 'Scheduled queue start',
     saveStrategy: 'Save Download Strategy', strategySaved: 'Download strategy saved',
     proxyTest: 'Test Proxy & Direct', proxyTesting: 'Testing connectivity...', useProxy: 'Use proxy when configured', proxyAddress: 'Proxy address (host:port)',
+    play: 'Preview', eta: 'ETA', notifyAllDone: 'All downloads finished',
+    nothingQueued: 'Nothing to download (already done, cancelled, or invalid range)',
+    invalidRange: 'Invalid range: start must not exceed end',
+    filterAll: 'All statuses', taskSearchPlaceholder: 'Filter by album or chapter...', noMatchTasks: 'No matching tasks',
+    removeTask: 'Remove', confirmRemoveActive: 'This task is active; removing it will stop the download. Remove?',
+    libraryTruncated: 'Showing first 5000 items only', themeAuto: 'System',
+    loadMoreChapters: 'Show more chapters',
+    cat_1: 'Fantasy', cat_2: 'Romance', cat_3: 'Urban', cat_4: 'Horror', cat_5: 'Thriller', cat_6: 'Mystery',
+    cat_7: 'Wuxia', cat_8: 'History', cat_9: 'Military', cat_10: 'Time Travel', cat_11: 'Sci-Fi', cat_12: 'LitRPG',
+    cat_13: 'Storytelling', cat_14: 'Opera', cat_15: 'Jokes', cat_16: 'Kids', cat_17: 'Finance', cat_18: 'Radio',
+    cat_19: 'Poetry', cat_20: 'Literature', cat_21: 'Cantonese', cat_22: 'Classics', cat_23: 'Crosstalk & Skits', cat_24: 'Lecture Forum',
   },
 };
 
@@ -192,7 +214,17 @@ const state = {
   updateIntervalMin: parseInt(localStorage.getItem('updateIntervalMin') || '30', 10),
   bookmarks: JSON.parse(localStorage.getItem('bookmarks') || '[]'),
   pageMode: 'browse',
+  taskFilter: localStorage.getItem('taskFilter') || 'all',
+  taskSearch: '',
+  chapterLimit: 500,
+  siteSearchLoaded: false,
 };
+
+// 下载完成通知的过渡检测：上一轮活跃数 > 0 且本轮为 0，且完成数有增长
+// （排除“全部停止”造成的活跃数归零）
+let lastActiveTasks = 0;
+let lastDoneCount = 0;
+let notifyPermissionAsked = false;
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -212,6 +244,83 @@ function formatBytes(n) {
   let i = 0, v = n;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function categoryName(id) {
+  const key = `cat_${id}`;
+  return (I18N[state.lang] && I18N[state.lang][key]) || '';
+}
+
+// 完成通知：仅在页面隐藏时弹系统通知，可见时用 toast，避免打扰
+function ensureNotifyPermission() {
+  if (notifyPermissionAsked || !('Notification' in window)) return;
+  notifyPermissionAsked = true;
+  if (Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (_) { /* 老浏览器 */ }
+  }
+}
+
+function onAllTasksFinished() {
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(t('appTitle'), { body: t('notifyAllDone') }); } catch (_) { /* ignore */ }
+  } else if (!document.hidden) {
+    showToast(t('notifyAllDone'), 3000);
+  }
+}
+
+// ---------------- audio player ----------------
+
+function bindPlayer() {
+  const audio = $('#playerAudio');
+  const toggle = $('#playerToggle');
+  toggle.addEventListener('click', () => {
+    if (!audio.src) return;
+    if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+  });
+  $('#playerStop').addEventListener('click', () => {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    $('#playerBar').style.display = 'none';
+  });
+  audio.addEventListener('play', updatePlayerIcon);
+  audio.addEventListener('pause', updatePlayerIcon);
+  audio.addEventListener('ended', updatePlayerIcon);
+  audio.addEventListener('error', () => {
+    if (!audio.src || $('#playerBar').style.display === 'none') return;
+    showToast(`${t('loadFailed')}: ${t('networkError')}`, 4000);
+    updatePlayerIcon();
+  });
+}
+
+function updatePlayerIcon() {
+  const audio = $('#playerAudio');
+  $('#playerToggle').textContent = audio.paused ? '▶' : '⏸';
+}
+
+function playEpisode(src, title) {
+  const audio = $('#playerAudio');
+  const bar = $('#playerBar');
+  $('#playerTitle').textContent = title;
+  bar.style.display = 'flex';
+  // 同一集重复点击时只恢复播放，不重新缓冲
+  if (bar.dataset.src === src) {
+    audio.play().catch(() => {});
+    return;
+  }
+  bar.dataset.src = src;
+  audio.src = src;
+  audio.play().catch((e) => showToast(`${t('loadFailed')}: ${e.message}`, 4000));
 }
 
 function showToast(msg, duration = 2500) {
@@ -256,6 +365,7 @@ function applyI18n() {
     if (I18N[state.lang][k]) el.placeholder = I18N[state.lang][k];
   });
   $('#browseFolderBtn').textContent = t('browse_btn');
+  renderTaskFilterOptions();
 }
 
 function setLang(lang) {
@@ -273,12 +383,26 @@ function setLang(lang) {
   }
 }
 
+const darkSchemeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+function resolveTheme(theme) {
+  if (theme === 'auto') return darkSchemeQuery && darkSchemeQuery.matches ? 'dark' : 'light';
+  return theme;
+}
+
 function setTheme(theme) {
   state.theme = theme;
-  document.documentElement.setAttribute('data-theme', theme);
+  // data-theme 只接受具体配色；auto 在此解析，避免在 CSS 里整块复制深色变量
+  document.documentElement.setAttribute('data-theme', resolveTheme(theme));
   localStorage.setItem('theme', theme);
   $$('.theme-btn').forEach((b) => b.classList.toggle('active', b.dataset.theme === theme));
   $('#themeSelect').value = theme;
+}
+
+if (darkSchemeQuery && darkSchemeQuery.addEventListener) {
+  darkSchemeQuery.addEventListener('change', () => {
+    if (state.theme === 'auto') setTheme('auto');
+  });
 }
 
 function switchPage(page) {
@@ -351,8 +475,8 @@ function renderResults() {
 
   container.innerHTML = state.results.map((item) => {
     const catName = state.pageMode === 'category'
-      ? CATEGORY_NAMES[state.category] || ''
-      : CATEGORY_NAMES[item.category] || (state.pageMode === 'site-search' ? t('tabSiteSearch') : t('tabSearch'));
+      ? categoryName(state.category)
+      : categoryName(item.category) || (state.pageMode === 'site-search' ? t('tabSiteSearch') : t('tabSearch'));
     const isBm = state.bookmarks.some((b) => b.id === item.id);
     return `<div class="result-card" data-id="${escapeHtml(item.id)}">
       <div class="card-cover">
@@ -414,13 +538,6 @@ function itemsById(id) {
   return state.results.find((r) => r.id === id) || { id, title: id };
 }
 
-const CATEGORY_NAMES = {
-  1: '玄幻', 2: '言情', 3: '都市', 4: '恐怖', 5: '惊悚', 6: '推理',
-  7: '武侠', 8: '历史', 9: '军事', 10: '穿越', 11: '科幻', 12: '网游',
-  13: '评书', 14: '戏曲', 15: '笑话', 16: '儿童', 17: '财经', 18: '广播',
-  19: '诗歌', 20: '文学', 21: '粤语', 22: '经典', 23: '相声小品', 24: '百家讲坛',
-};
-
 // ---------------- album ----------------
 
 function extractAlbumId(input) {
@@ -444,6 +561,7 @@ async function openAlbum(id, showModal) {
     if (showModal) {
       renderAlbumModal(album);
       $('#detailModal').style.display = 'flex';
+      $('#modalClose').focus();
     }
   } catch (e) {
     showToast(`${t('albumNotFound')}: ${e.message}`);
@@ -455,6 +573,7 @@ async function openAlbum(id, showModal) {
 function renderAlbumModal(album) {
   $('#detailTitle').textContent = album.title;
   const chapters = album.chapters || [];
+  state.chapterLimit = 500;
   const body = $('#detailBody');
 
   body.innerHTML = `
@@ -500,17 +619,7 @@ function renderAlbumModal(album) {
       <button class="btn-secondary btn-sm" id="exportIssuesBtn">${t('exportIssues')}</button>
     </div>
 
-    <div class="chapter-list" id="chapterList">
-      ${chapters.map((ch) => `
-        <div class="chapter-item" data-index="${ch.index}">
-          <input type="checkbox" class="chapter-check" data-check="${ch.index}" aria-label="${escapeHtml(ch.title)}">
-          <span class="chapter-index">${String(ch.index + 1).padStart(4, '0')}</span>
-          <span class="chapter-title" title="${escapeHtml(ch.title)}">${escapeHtml(ch.title)}</span>
-          <span class="chapter-status" data-status-for="${ch.index}"></span>
-          <button class="chapter-btn" data-dl="${ch.index}">${t('download')}</button>
-        </div>
-      `).join('')}
-    </div>
+    <div class="chapter-list" id="chapterList"></div>
   `;
 
   $('#dlAlbumAll').addEventListener('click', () => downloadAlbum(album.id));
@@ -519,9 +628,13 @@ function renderAlbumModal(album) {
     $('#bmAlbumBtn').textContent = isBookmarked(album.id) ? `★ ${t('bookmarks')}` : t('bookmarks');
   });
   $('#dlRangeBtn').addEventListener('click', () => {
-    const from = Math.max(0, parseInt($('#rangeFrom').value, 10) - 1) || 0;
-    const to = Math.min(chapters.length - 1, (parseInt($('#rangeTo').value, 10) || chapters.length) - 1);
-    downloadAlbum(album.id, from, to);
+    const fromRaw = parseInt($('#rangeFrom').value, 10);
+    const toRaw = parseInt($('#rangeTo').value, 10);
+    if (!Number.isFinite(fromRaw) || !Number.isFinite(toRaw)) { showToast(t('invalidRange')); return; }
+    const from = Math.max(1, Math.min(chapters.length, fromRaw));
+    const to = Math.max(1, Math.min(chapters.length, toRaw));
+    if (from > to) { showToast(t('invalidRange')); return; }
+    downloadAlbum(album.id, from - 1, to - 1);
   });
   $('#selectAllChapters').addEventListener('click', () => {
     $$('.chapter-check').forEach((box) => { box.checked = true; });
@@ -542,13 +655,44 @@ function renderAlbumModal(album) {
     downloadAlbum(album.id, null, null, indexes);
   });
   $('#exportIssuesBtn').addEventListener('click', () => exportChapterIssues(album));
-  body.querySelectorAll('.chapter-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const idx = parseInt(btn.dataset.dl, 10);
-      const ch = chapters.find((c) => c.index === idx);
-      downloadChapter(album, ch);
-    });
+
+  // 章节列表事件委托 + 分批渲染：两千集以上的专辑不再一次建几千个节点
+  const renderChapterList = () => {
+    const shown = chapters.slice(0, state.chapterLimit);
+    const remaining = chapters.length - shown.length;
+    $('#chapterList').innerHTML = shown.map((ch) => `
+      <div class="chapter-item" data-index="${ch.index}">
+        <input type="checkbox" class="chapter-check" data-check="${ch.index}" aria-label="${escapeHtml(ch.title)}">
+        <span class="chapter-index">${String(ch.index + 1).padStart(4, '0')}</span>
+        <span class="chapter-title" title="${escapeHtml(ch.title)}">${escapeHtml(ch.title)}</span>
+        <span class="chapter-status" data-status-for="${ch.index}"></span>
+        <button class="chapter-btn" data-play="${ch.index}" title="${escapeHtml(t('play'))}">▶ ${t('play')}</button>
+        <button class="chapter-btn" data-dl="${ch.index}">${t('download')}</button>
+      </div>
+    `).join('') + (remaining > 0
+      ? `<button type="button" class="btn-secondary btn-sm chapter-load-more" id="loadMoreChapters">${t('loadMoreChapters')} (+${remaining})</button>`
+      : '');
+    updateChapterStatuses();
+  };
+  $('#chapterList').addEventListener('click', (e) => {
+    if (e.target.closest('#loadMoreChapters')) {
+      state.chapterLimit += 1000;
+      renderChapterList();
+      return;
+    }
+    const playBtn = e.target.closest('[data-play]');
+    if (playBtn) {
+      const ch = chapters.find((c) => c.index === parseInt(playBtn.dataset.play, 10));
+      if (ch) playEpisode(`/api/stream?id=${album.id}&index=${ch.index}&line=${ch.line || 0}`, `${album.title} · ${ch.title}`);
+      return;
+    }
+    const btn = e.target.closest('[data-dl]');
+    if (btn) {
+      const ch = chapters.find((c) => c.index === parseInt(btn.dataset.dl, 10));
+      if (ch) downloadChapter(album, ch);
+    }
   });
+  renderChapterList();
 
   updateChapterStatuses();
 }
@@ -625,6 +769,7 @@ function updateChapterStatuses() {
 }
 
 async function downloadChapter(album, chapter) {
+  ensureNotifyPermission();
   try {
     await api('/api/download', {
       id: album.id,
@@ -645,13 +790,16 @@ async function downloadChapter(album, chapter) {
 async function downloadAlbum(id, from, to, indexes) {
   id = extractAlbumId(id);
   if (!id) { showToast(t('enterAlbumHint')); return; }
+  ensureNotifyPermission();
   try {
     const params = { id, mode: 'album', path: state.savePath };
     if (from != null) params.from = from;
     if (to != null) params.to = to;
     if (indexes && indexes.length) params.indexes = indexes.join(',');
     const r = await api('/api/download', params);
-    showToast(`${t('toastQueued')} (${r.queued})`);
+    if (r.warning) showToast(r.warning, 6000);
+    if (r.queued) showToast(`${t('toastQueued')} (${r.queued})`);
+    else showToast(t('nothingQueued'), 3500);
     refreshTasks();
   } catch (e) {
     showToast(`${t('networkError')}: ${e.message}`);
@@ -670,6 +818,13 @@ async function refreshTasks() {
     taskTotal = data.total != null ? data.total : state.tasks.length;
     const active = (data.stats ? data.stats.queued + data.stats.active : 0)
       || state.tasks.filter((x) => x.status === 'queued' || x.status === 'downloading').length;
+    const doneNow = data.stats ? data.stats.done : 0;
+    // 活跃数归零且完成数在增长 = 全部下载完成；全部停止不会增加完成数，不触发
+    if (lastActiveTasks > 0 && active === 0 && doneNow > lastDoneCount) {
+      onAllTasksFinished();
+    }
+    lastActiveTasks = active;
+    lastDoneCount = doneNow;
     const badge = $('#downloadBadge');
     if (active > 0) {
       badge.textContent = active;
@@ -684,11 +839,19 @@ async function refreshTasks() {
 
 function startTaskPolling() {
   if (state.taskTimer) return;
-  state.taskTimer = setInterval(refreshTasks, state.refreshInterval);
+  // 页面隐藏时降到至少 5 秒一轮，省电又不耽误完成通知的及时性
+  const interval = document.hidden ? Math.max(state.refreshInterval, 5000) : state.refreshInterval;
+  state.taskTimer = setInterval(refreshTasks, interval);
 }
 function stopTaskPolling() {
   if (state.taskTimer) { clearInterval(state.taskTimer); state.taskTimer = null; }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!state.taskTimer) return;
+  stopTaskPolling();
+  startTaskPolling();
+});
 
 function statusText(task) {
   switch (task.status) {
@@ -748,6 +911,8 @@ function taskRowHtml(task) {
           ? `<span class="status-cancelled-text">${t('cancelled')}${task.received ? ` · ${formatBytes(task.received)}` : ''}</span>`
           : `<span>${statusText(task)}${task.total ? ` · ${formatBytes(task.received)} / ${formatBytes(task.total)}` : ''}</span>`}
         ${isActive && task.speed ? `<span class="item-speed">${formatBytes(task.speed)}/s</span>` : ''}
+        ${isActive && task.speed && task.total && task.total > task.received
+          ? `<span class="item-speed">${t('eta')} ${formatDuration((task.total - task.received) / task.speed)}</span>` : ''}
       </div>
     </div>
     <div class="item-actions">
@@ -757,13 +922,25 @@ function taskRowHtml(task) {
       ` : ''}
       ${isErr || isCancelled ? `<button class="card-btn" data-act="retry" data-id="${task.id}">${t('retry')}</button>` : ''}
       ${isActive || task.status === 'queued' ? `<button class="card-btn" data-act="cancel" data-id="${task.id}">${t('cancel')}</button>` : ''}
+      <button class="card-btn" data-act="remove" data-id="${task.id}">${t('removeTask')}</button>
     </div>
   </div>`;
 }
 
-function groupDownloadTasks() {
+function filteredTasks() {
+  const status = state.taskFilter;
+  const q = state.taskSearch.trim().toLowerCase();
+  return state.tasks.filter((task) => {
+    if (status !== 'all' && task.status !== status) return false;
+    if (!q) return true;
+    return [task.albumTitle, task.fileName, task.chapterTitle]
+      .some((v) => String(v || '').toLowerCase().includes(q));
+  });
+}
+
+function groupDownloadTasks(list) {
   const groups = new Map();
-  for (const task of state.tasks) {
+  for (const task of list) {
     const key = String(task.albumId || 'unknown');
     if (!groups.has(key)) groups.set(key, { key, title: task.albumTitle || `ID ${key}`, tasks: [] });
     const group = groups.get(key);
@@ -830,6 +1007,21 @@ function renderTaskStats(stats) {
   `;
 }
 
+function renderTaskFilterOptions() {
+  const sel = $('#taskStatusFilter');
+  if (!sel) return;
+  const opts = [
+    ['all', t('filterAll')],
+    ['queued', t('queued')],
+    ['downloading', t('downloading')],
+    ['done', t('done')],
+    ['error', t('error')],
+    ['cancelled', t('cancelled')],
+  ];
+  sel.innerHTML = opts.map(([v, label]) => `<option value="${v}">${escapeHtml(label)}</option>`).join('');
+  sel.value = state.taskFilter;
+}
+
 function renderTasks() {
   const container = $('#downloadList');
 
@@ -851,7 +1043,16 @@ function renderTasks() {
 
   renderTaskStats(state.stats);
 
-  const groups = groupDownloadTasks();
+  const visible = filteredTasks();
+  if (!visible.length) {
+    container.innerHTML = `<div class="empty-state"><p>${escapeHtml(t('noMatchTasks'))}</p></div>`;
+    taskView.order = '';
+    taskView.sigs.clear();
+    taskView.groupSigs.clear();
+    return;
+  }
+
+  const groups = groupDownloadTasks(visible);
   const order = groups.map((group) => `${group.key}:${group.tasks.map((task) => task.id).join(',')}`).join('|');
   if (order !== taskView.order) {
     // 任务、分组或顺序变化 —— 整表重建，折叠状态保留
@@ -1021,10 +1222,12 @@ async function siteSearch() {
     hideLoading();
     return;
   }
-  showLoading(t('siteSearchLoading'));
+  // 只有第一次（索引尚未就绪）才提示“需加载全站索引”
+  showLoading(state.siteSearchLoaded ? t('loading') : t('siteSearchLoading'));
   try {
     const data = await api('/api/site-search', { q: query });
     if (requestSeq !== state.categoryRequestSeq) return;
+    state.siteSearchLoaded = true;
     state.results = data.items || [];
     renderResults();
     loadSiteSearchCovers(requestSeq);
@@ -1045,18 +1248,30 @@ async function loadSiteSearchCovers(requestSeq) {
       const data = await api('/api/site-covers', { ids: batch.join(',') });
       if (requestSeq !== state.categoryRequestSeq || state.pageMode !== 'site-search') return;
       let changed = false;
+      let allApplied = true;
       for (const item of state.results) {
         const cover = data.covers && data.covers[item.id];
         if (cover && !item.cover) {
           item.cover = cover;
           changed = true;
+          // 只替换对应卡片的封面，避免整页重渲染造成闪烁与监听器重建
+          if (!updateCardCover(item.id, cover)) allApplied = false;
         }
       }
-      if (changed) renderResults();
+      if (changed && !allApplied) renderResults();
     } catch (e) {
       console.warn(`搜索封面加载失败: ${e.message}`);
     }
   }
+}
+
+function updateCardCover(id, cover) {
+  const card = document.querySelector(`#searchResults .result-card[data-id="${id}"]`);
+  if (!card) return false;
+  const holder = card.querySelector('.card-cover');
+  if (!holder) return false;
+  holder.innerHTML = `<img src="${coverUrl(cover)}" alt="" loading="lazy" onerror="this.outerHTML=placeholderSvg()">`;
+  return true;
 }
 
 async function loadLibrary() {
@@ -1067,6 +1282,7 @@ async function loadLibrary() {
     });
     state.library = data.items || [];
     state.libraryTotal = data.total || 0;
+    state.libraryTruncated = !!data.truncated;
     renderLibrary(data);
   } catch (e) {
     showToast(`${t('loadFailed')}: ${e.message}`);
@@ -1089,7 +1305,9 @@ function renderLibrary(meta) {
     group.mtime = Math.max(group.mtime, Number(item.mtime) || 0);
   });
   const albums = Array.from(grouped.values()).sort((a, b) => b.mtime - a.mtime);
-  $('#libraryStats').textContent = `${albums.length} ${t('libraryAlbums')} · ${state.libraryTotal} ${t('libraryFiles')} · ${meta && meta.root ? meta.root : state.savePath}`;
+  let statsText = `${albums.length} ${t('libraryAlbums')} · ${state.libraryTotal} ${t('libraryFiles')} · ${meta && meta.root ? meta.root : state.savePath}`;
+  if (state.libraryTruncated) statsText += ` · ${t('libraryTruncated')}`;
+  $('#libraryStats').textContent = statsText;
   if (!state.library.length) {
     container.innerHTML = `<div class="empty-state"><p>${escapeHtml(t('noLibrary'))}</p></div>`;
     return;
@@ -1116,6 +1334,7 @@ function renderLibrary(meta) {
           <div class="library-meta">${formatBytes(item.size)} · ${new Date(item.mtime).toLocaleString()}</div>
         </div>
         <div class="library-actions">
+          <button class="card-btn" data-lib="play" data-path="${escapeHtml(item.path)}" data-title="${escapeHtml(item.name)}">${t('play')}</button>
           <button class="card-btn" data-lib="open" data-path="${escapeHtml(item.path)}">${t('openFile')}</button>
           <button class="card-btn" data-lib="reveal" data-path="${escapeHtml(item.path)}">${t('revealFile')}</button>
           <button class="card-btn" data-lib="delete" data-path="${escapeHtml(item.path)}">${t('deleteFile')}</button>
@@ -1345,6 +1564,9 @@ function bindEvents() {
         await api('/api/delete-file', { path: btn.dataset.path });
         showToast(t('toastDeleted'));
         loadLibrary();
+      } else if (action === 'play') {
+        playEpisode(`/api/local-audio?path=${encodeURIComponent(btn.dataset.path)}`,
+          btn.dataset.title || btn.dataset.path);
       } else {
         await api(action === 'open' ? '/api/open-file' : '/api/reveal-file', { path: btn.dataset.path });
       }
@@ -1389,6 +1611,11 @@ function bindEvents() {
   $('#detailModal').addEventListener('click', (e) => {
     if (e.target.id === 'detailModal') $('#detailModal').style.display = 'none';
   });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#detailModal').style.display !== 'none') {
+      $('#detailModal').style.display = 'none';
+    }
+  });
 
   // downloads —— 事件委托，行被替换后无需重新绑定
   $('#downloadList').addEventListener('click', async (e) => {
@@ -1416,12 +1643,35 @@ function bindEvents() {
         await api('/api/cancel', { id: btn.dataset.id });
         refreshTasks();
       } catch (err) { showToast(err.message); }
+    } else if (act === 'remove') {
+      const task = state.tasks.find((x) => String(x.id) === String(btn.dataset.id));
+      if (task && (task.status === 'downloading' || task.status === 'queued')
+        && !confirm(t('confirmRemoveActive'))) return;
+      try {
+        await api('/api/remove-task', { id: btn.dataset.id });
+        refreshTasks();
+      } catch (err) { showToast(err.message); }
     }
   });
 
   $('#clearDownloads').addEventListener('click', () => clearTasksByScope('done', 'confirmClear'));
   $('#clearFailedDownloads').addEventListener('click', () => clearTasksByScope('error', 'confirmClearFailed'));
   $('#clearAllDownloads').addEventListener('click', () => clearTasksByScope('all', 'confirmClearAll'));
+
+  // 下载页过滤
+  $('#taskStatusFilter').addEventListener('change', (e) => {
+    state.taskFilter = e.target.value;
+    localStorage.setItem('taskFilter', state.taskFilter);
+    renderTasks();
+  });
+  let taskSearchDebounce = null;
+  $('#taskSearchInput').addEventListener('input', (e) => {
+    clearTimeout(taskSearchDebounce);
+    taskSearchDebounce = setTimeout(() => {
+      state.taskSearch = e.target.value;
+      renderTasks();
+    }, 200);
+  });
 
   $('#stopAllDownloads').addEventListener('click', async () => {
     if (!confirm(t('confirmStopAll'))) return;
@@ -1490,6 +1740,7 @@ function bindEvents() {
   });
 
   $('#saveStrategyBtn').addEventListener('click', saveStrategySettings);
+  bindPlayer();
   $('#proxyTestBtn').addEventListener('click', testProxyConnections);
   $('#useProxyInput').addEventListener('change', async (e) => {
     const input = e.target;

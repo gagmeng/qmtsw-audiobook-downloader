@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>全民听书网 下载器</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -75,6 +75,11 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
           </svg>
         </button>
+        <button class="theme-btn" data-theme="auto" title="System">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><path d="M8 8h8M8 12h5"/>
+          </svg>
+        </button>
         <button class="theme-btn" data-theme="blue" title="Ocean">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>
@@ -113,7 +118,6 @@
         </div>
         <div class="search-tabs">
           <button class="tab active" data-tab="category" data-i18n="tabCategory">分类浏览</button>
-          <button class="tab" data-tab="album" data-i18n="tabAlbum">专辑直达</button>
           <button class="tab" data-tab="site-search" data-i18n="tabSiteSearch">全站搜索</button>
           <button class="tab" data-tab="search" data-i18n="tabSearch">本地搜索</button>
         </div>
@@ -127,30 +131,30 @@
         </div>
         <div class="search-history" id="searchHistory"></div>
         <div class="category-tabs" id="categoryTabs">
-          <button class="cat-tab active" data-cat="1">玄幻</button>
-          <button class="cat-tab" data-cat="2">言情</button>
-          <button class="cat-tab" data-cat="3">都市</button>
-          <button class="cat-tab" data-cat="4">恐怖</button>
-          <button class="cat-tab" data-cat="5">惊悚</button>
-          <button class="cat-tab" data-cat="6">推理</button>
-          <button class="cat-tab" data-cat="7">武侠</button>
-          <button class="cat-tab" data-cat="8">历史</button>
-          <button class="cat-tab" data-cat="9">军事</button>
-          <button class="cat-tab" data-cat="10">穿越</button>
-          <button class="cat-tab" data-cat="11">科幻</button>
-          <button class="cat-tab" data-cat="12">网游</button>
-          <button class="cat-tab" data-cat="13">评书</button>
-          <button class="cat-tab" data-cat="14">戏曲</button>
-          <button class="cat-tab" data-cat="15">笑话</button>
-          <button class="cat-tab" data-cat="16">儿童</button>
-          <button class="cat-tab" data-cat="17">财经</button>
-          <button class="cat-tab" data-cat="18">广播</button>
-          <button class="cat-tab" data-cat="19">诗歌</button>
-          <button class="cat-tab" data-cat="20">文学</button>
-          <button class="cat-tab" data-cat="21">粤语</button>
-          <button class="cat-tab" data-cat="22">经典</button>
-          <button class="cat-tab" data-cat="23">相声小品</button>
-          <button class="cat-tab" data-cat="24">百家讲坛</button>
+          <button class="cat-tab active" data-cat="1" data-i18n="cat_1">玄幻</button>
+          <button class="cat-tab" data-cat="2" data-i18n="cat_2">言情</button>
+          <button class="cat-tab" data-cat="3" data-i18n="cat_3">都市</button>
+          <button class="cat-tab" data-cat="4" data-i18n="cat_4">恐怖</button>
+          <button class="cat-tab" data-cat="5" data-i18n="cat_5">惊悚</button>
+          <button class="cat-tab" data-cat="6" data-i18n="cat_6">推理</button>
+          <button class="cat-tab" data-cat="7" data-i18n="cat_7">武侠</button>
+          <button class="cat-tab" data-cat="8" data-i18n="cat_8">历史</button>
+          <button class="cat-tab" data-cat="9" data-i18n="cat_9">军事</button>
+          <button class="cat-tab" data-cat="10" data-i18n="cat_10">穿越</button>
+          <button class="cat-tab" data-cat="11" data-i18n="cat_11">科幻</button>
+          <button class="cat-tab" data-cat="12" data-i18n="cat_12">网游</button>
+          <button class="cat-tab" data-cat="13" data-i18n="cat_13">评书</button>
+          <button class="cat-tab" data-cat="14" data-i18n="cat_14">戏曲</button>
+          <button class="cat-tab" data-cat="15" data-i18n="cat_15">笑话</button>
+          <button class="cat-tab" data-cat="16" data-i18n="cat_16">儿童</button>
+          <button class="cat-tab" data-cat="17" data-i18n="cat_17">财经</button>
+          <button class="cat-tab" data-cat="18" data-i18n="cat_18">广播</button>
+          <button class="cat-tab" data-cat="19" data-i18n="cat_19">诗歌</button>
+          <button class="cat-tab" data-cat="20" data-i18n="cat_20">文学</button>
+          <button class="cat-tab" data-cat="21" data-i18n="cat_21">粤语</button>
+          <button class="cat-tab" data-cat="22" data-i18n="cat_22">经典</button>
+          <button class="cat-tab" data-cat="23" data-i18n="cat_23">相声小品</button>
+          <button class="cat-tab" data-cat="24" data-i18n="cat_24">百家讲坛</button>
         </div>
       </div>
       <div class="search-results" id="searchResults">
@@ -206,6 +210,10 @@
         </div>
       </div>
       <div class="download-stats" id="downloadStats"></div>
+      <div class="download-toolbar">
+        <select id="taskStatusFilter" class="setting-input" style="width:auto"></select>
+        <input type="text" id="taskSearchInput" class="setting-input" data-i18n-ph="taskSearchPlaceholder" placeholder="按专辑或章节名过滤..." autocomplete="off">
+      </div>
       <div class="download-list" id="downloadList">
         <div class="empty-state">
           <svg viewBox="0 0 120 120" width="80" height="80">
@@ -331,6 +339,7 @@
           <select id="themeSelect" class="setting-input">
             <option value="light" data-i18n="themeLight">浅色</option>
             <option value="dark" data-i18n="themeDark">深色</option>
+            <option value="auto" data-i18n="themeAuto">跟随系统</option>
             <option value="blue" data-i18n="themeBlue">海洋蓝</option>
             <option value="rose" data-i18n="themeRose">玫瑰金</option>
             <option value="forest" data-i18n="themeForest">森林绿</option>
@@ -359,7 +368,7 @@
           </div>
           <div class="setting-info">
             <span class="setting-label" data-i18n="about">关于</span>
-            <span class="setting-desc">QMTSW Audio Downloader v1.2.0 · qmtsw.com</span>
+            <span class="setting-desc">QMTSW Audio Downloader v1.3.0 · qmtsw.com</span>
           </div>
         </div>
       </div>
@@ -383,6 +392,20 @@
 
   <!-- Toast -->
   <div class="toast" id="toast" style="display:none"></div>
+
+  <!-- Mini Player -->
+  <div class="player-bar" id="playerBar" style="display:none">
+    <button class="player-btn" id="playerToggle" aria-label="Play/Pause">▶</button>
+    <div class="player-info">
+      <div class="player-title" id="playerTitle"></div>
+      <audio id="playerAudio" preload="none"></audio>
+    </div>
+    <button class="player-btn" id="playerStop" aria-label="Stop">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
 
   <!-- Loading Overlay -->
   <div class="loading-overlay" id="loadingOverlay" style="display:none">

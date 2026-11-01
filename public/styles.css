@@ -2032,3 +2032,80 @@ select.setting-input {
   .library-item { align-items: flex-start; flex-direction: column; }
   .library-actions { width: 100%; }
 }
+
+/* Download page toolbar: status filter + keyword filtering */
+.download-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.download-toolbar .setting-input {
+  min-width: 0;
+}
+
+.download-toolbar input.setting-input {
+  flex: 1;
+}
+
+/* Batch load more button for chapter list */
+.chapter-load-more {
+  display: block;
+  margin: 12px auto 4px;
+}
+
+/* Floating mini player */
+.player-bar {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(520px, calc(100vw - 40px));
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
+}
+
+.player-bar .player-info {
+  min-width: 0;
+}
+
+.player-bar .player-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 380px;
+}
+
+.player-bar .player-btn {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-secondary);
+  color: var(--accent-primary);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background var(--transition);
+}
+
+.player-bar .player-btn:hover {
+  background: var(--bg-hover);
+}
+
+@media (max-width: 640px) {
+  .player-bar .player-title { max-width: 180px; }
+  .player-bar { right: 12px; bottom: 12px; }
+}
