@@ -832,9 +832,13 @@ async function getSiteSearchIndex() {
   }
 }
 
-async function searchSiteAlbums(query) {
+async function searchSiteAlbums(query, page = 1, perPage = 20) {
+  const pageSize = clampPerPage(parseInt(perPage, 10));
+  const requestedPage = Math.max(1, parseInt(page, 10) || 1);
   const q = String(query || '').trim().toLowerCase();
-  if (!q) return { items: [], total: 0, indexed: siteSearchCache.items.length };
+  if (!q) {
+    return { items: [], total: 0, indexed: siteSearchCache.items.length, page: 1, perPage: pageSize, totalPages: 1 };
+  }
   const terms = q.split(/\s+/).filter(Boolean);
   const source = await getSiteSearchIndex();
   const matched = [];
@@ -855,7 +859,11 @@ async function searchSiteAlbums(query) {
     matched.push({ item, score });
   }
   matched.sort((a, b) => b.score - a.score);
-  const items = matched.slice(0, 60).map(({ item }) => {
+  const total = matched.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(requestedPage, totalPages);
+  const offset = (currentPage - 1) * pageSize;
+  const items = matched.slice(offset, offset + pageSize).map(({ item }) => {
     const cached = albumIndex.get(item.id);
     return {
       id: item.id, title: item.title, author: item.author, pubDate: item.pubDate,
@@ -863,7 +871,7 @@ async function searchSiteAlbums(query) {
       category: cached ? cached.category : null,
     };
   });
-  return { items, total: matched.length, indexed: source.length };
+  return { items, total, indexed: source.length, page: currentPage, perPage: pageSize, totalPages };
 }
 
 const siteCoverJobs = new Map();
@@ -1640,7 +1648,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/site-search') {
-      return sendJson(res, 200, await searchSiteAlbums(query.q));
+      return sendJson(res, 200, await searchSiteAlbums(query.q, query.page, query.perPage));
     }
 
     // --- 本地专辑索引与搜索历史 ---

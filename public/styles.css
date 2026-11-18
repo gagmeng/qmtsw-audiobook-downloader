@@ -1846,6 +1846,41 @@ select.setting-input {
   margin-top: 12px;
 }
 
+.site-search-status {
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.site-search-status[data-status="loading"] {
+  color: var(--accent-primary);
+}
+
+.site-search-status[data-status="error"] {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-left: 3px solid var(--accent-primary);
+  padding-left: 10px;
+}
+
+#siteSearchBtn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+  transform: none;
+}
+
+.empty-state .empty-detail {
+  max-width: 760px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .search-history {
   display: flex;
   flex-wrap: wrap;

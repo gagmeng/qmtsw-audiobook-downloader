@@ -4,6 +4,7 @@
 // ============================================================
 
 const API_BASE = '';
+const SITE_SEARCH_TIMEOUT_MS = 120000;
 
 // ---------------- i18n ----------------
 const I18N = {
@@ -74,7 +75,16 @@ const I18N = {
     refresh: '刷新', noLibrary: '未找到音频文件',
     libraryAlbums: '个专辑', libraryFiles: '个文件', viewChapters: '查看章节', collapseChapters: '收起章节',
     tabSearch: '本地搜索', localSearch: '搜索', localSearchPlaceholder: '搜索已浏览或打开的专辑...',
-    tabSiteSearch: '全站搜索', siteSearchPlaceholder: '输入关键词搜索全站专辑...', siteSearchLoading: '首次搜索需加载全站专辑索引，请稍候...',
+    tabSiteSearch: '全站搜索', siteSearchPlaceholder: '输入关键词搜索全站专辑...', siteSearchLoading: '首次搜索可能需要加载站点专辑索引，请稍候...',
+    siteSearchHint: '输入关键词搜索站点 RSS 专辑索引。',
+    siteSearching: '正在搜索“{query}”...',
+    siteSearchSummary: '搜索“{query}”已完成：已检索 {indexed} 个专辑，找到 {total} 个匹配。',
+    siteSearchPagination: ' 当前第 {page}/{pages} 页，每页 {perPage} 条。',
+    siteSearchRestart: '服务端分页信息不可用，请重新启动下载器后刷新页面。',
+    siteSearchNoMatch: '当前站点 RSS 索引中没有匹配“{query}”的专辑。可尝试缩短关键词，或输入专辑 ID；索引未命中不代表站点一定没有该专辑。',
+    siteSearchFailed: '搜索失败：{error}',
+    siteSearchRetry: '请重新点击“搜索”重试。',
+    siteSearchTimeout: '搜索等待超过 120 秒，请重试或检查网络。',
     selectAll: '全选', invertSelection: '反选', selectPending: '未下载/失败',
     downloadSelected: '下载所选', exportIssues: '导出失败清单', noSelection: '请先选择章节',
     noIssues: '没有可导出的失败记录', newChapters: '{n} 个新章节',
@@ -164,7 +174,16 @@ const I18N = {
     refresh: 'Refresh', noLibrary: 'No audio files found',
     libraryAlbums: 'albums', libraryFiles: 'files', viewChapters: 'View chapters', collapseChapters: 'Hide chapters',
     tabSearch: 'Local Search', localSearch: 'Search', localSearchPlaceholder: 'Search browsed or opened albums...',
-    tabSiteSearch: 'Site Search', siteSearchPlaceholder: 'Search all site albums by keyword...', siteSearchLoading: 'Loading the site album index for the first search...',
+    tabSiteSearch: 'Site Search', siteSearchPlaceholder: 'Search all site albums by keyword...', siteSearchLoading: 'The first search may need to load the site album index...',
+    siteSearchHint: 'Enter a keyword to search the site RSS album index.',
+    siteSearching: 'Searching for “{query}”...',
+    siteSearchSummary: 'Search for “{query}” completed. Indexed albums: {indexed}; matches: {total}.',
+    siteSearchPagination: ' Page {page}/{pages}, {perPage} albums per page.',
+    siteSearchRestart: 'Server pagination is unavailable. Restart the downloader and refresh the page.',
+    siteSearchNoMatch: 'No albums matching “{query}” were found in the current site RSS index. Try a shorter keyword or enter an album ID; no index match does not mean the album is absent from the site.',
+    siteSearchFailed: 'Search failed: {error}',
+    siteSearchRetry: 'Click “Search” to try again.',
+    siteSearchTimeout: 'The search wait exceeded 120 seconds. Try again or check the network.',
     selectAll: 'Select All', invertSelection: 'Invert', selectPending: 'Pending / Failed',
     downloadSelected: 'Download Selected', exportIssues: 'Export Failures', noSelection: 'Select chapters first',
     noIssues: 'No failures to export', newChapters: '{n} new chapter(s)',
@@ -218,7 +237,13 @@ const state = {
   taskSearch: '',
   chapterLimit: 500,
   siteSearchLoaded: false,
+  siteSearch: {
+    query: '', status: 'idle', total: 0, indexed: 0, error: '', errorKey: '',
+    page: 1, perPage: 20, totalPages: 1,
+  },
 };
+
+let siteSearchRequest = null;
 
 // 下载完成通知的过渡检测：上一轮活跃数 > 0 且本轮为 0，且完成数有增长
 // （排除“全部停止”造成的活跃数归零）
@@ -236,6 +261,18 @@ function escapeHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function cleanPersonNames(value) {
+  // 人员字段可能夹带搜索链接；保留姓名、分隔相邻链接，最后仍安全转义。
+  return String(value == null ? '' : value)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<\/a\s*>|<br\b[^>]*>/gi, '、')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/(?:\s*、\s*)+/g, '、')
+    .replace(/^、|、$/g, '')
+    .trim();
 }
 
 function formatBytes(n) {
@@ -347,8 +384,12 @@ async function api(path, params, options) {
     method: opts.method || 'GET',
     headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
+    signal: opts.signal,
   });
-  const data = await r.json().catch(() => ({}));
+  const data = await r.json().catch((e) => {
+    if (opts.signal && opts.signal.aborted) throw e;
+    return {};
+  });
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
 }
@@ -358,11 +399,11 @@ async function api(path, params, options) {
 function applyI18n() {
   $$('[data-i18n]').forEach((el) => {
     const k = el.dataset.i18n;
-    if (I18N[state.lang][k]) el.textContent = I18N[state.lang][k];
+    if (I18N[state.lang][k] !== undefined) el.textContent = I18N[state.lang][k];
   });
   $$('[data-i18n-ph]').forEach((el) => {
     const k = el.dataset.i18nPh;
-    if (I18N[state.lang][k]) el.placeholder = I18N[state.lang][k];
+    if (I18N[state.lang][k] !== undefined) el.placeholder = I18N[state.lang][k];
   });
   $('#browseFolderBtn').textContent = t('browse_btn');
   renderTaskFilterOptions();
@@ -406,6 +447,11 @@ if (darkSchemeQuery && darkSchemeQuery.addEventListener) {
 }
 
 function switchPage(page) {
+  if (page !== 'browse' && siteSearchRequest) {
+    state.categoryRequestSeq++;
+    cancelSiteSearch();
+    renderResults();
+  }
   $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.page === page));
   $$('.page').forEach((p) => p.classList.remove('active'));
   const el = $(`#page-${page}`);
@@ -419,8 +465,10 @@ function switchPage(page) {
 // ---------------- browse ----------------
 
 async function loadCategory(cat, page) {
+  cancelSiteSearch();
   const requestSeq = ++state.categoryRequestSeq;
   state.pageMode = 'category';
+  renderSiteSearchStatus();
   state.category = cat;
   state.page = page || 1;
   showLoading(t('loading'));
@@ -458,18 +506,111 @@ function placeholderSvg() {
   </svg>`;
 }
 
+function siteSearchText(key) {
+  const search = state.siteSearch;
+  const locale = state.lang === 'en' ? 'en-US' : 'zh-CN';
+  const values = {
+    query: search.query,
+    indexed: search.indexed.toLocaleString(locale),
+    total: search.total.toLocaleString(locale),
+    page: search.page.toLocaleString(locale),
+    pages: search.totalPages.toLocaleString(locale),
+    perPage: search.perPage.toLocaleString(locale),
+    error: search.errorKey ? t(search.errorKey) : search.error,
+  };
+  return t(key).replace(/\{(\w+)\}/g, (match, name) => values[name] ?? match);
+}
+
+function renderSiteSearchStatus() {
+  const active = state.pageMode === 'site-search';
+  const search = state.siteSearch;
+  const loading = active && search.status === 'loading';
+  const status = $('#siteSearchStatus');
+  $('#siteSearchBtn').disabled = loading;
+  $('#siteSearchBar').setAttribute('aria-busy', String(loading));
+  status.hidden = !active || search.status === 'idle';
+  status.dataset.status = search.status;
+  let text = '';
+  if (!status.hidden) {
+    if (loading) {
+      text = state.siteSearchLoaded ? siteSearchText('siteSearching') : t('siteSearchLoading');
+    } else if (search.status === 'error') {
+      text = `${siteSearchText('siteSearchFailed')} ${t('siteSearchRetry')}`;
+    } else if (search.status === 'success') {
+      text = siteSearchText('siteSearchSummary');
+      if (search.total > 0) text += siteSearchText('siteSearchPagination');
+    }
+  }
+  // 动态关键词和错误只作为文本展示，不插入 HTML。
+  status.textContent = text;
+}
+
+function cancelSiteSearch() {
+  if (!siteSearchRequest) return;
+  const request = siteSearchRequest;
+  siteSearchRequest = null;
+  clearTimeout(request.timer);
+  request.controller.abort();
+  if (state.siteSearch.status === 'loading') state.siteSearch.status = 'idle';
+}
+
+function getPaginationState() {
+  if (state.pageMode === 'site-search') {
+    const search = state.siteSearch;
+    return { page: search.page, totalPages: search.totalPages, totalItems: search.total, perPage: search.perPage };
+  }
+  return { page: state.page, totalPages: state.totalPages, totalItems: state.totalItems, perPage: state.perPage };
+}
+
+function loadResultsPage(page) {
+  if (state.pageMode === 'site-search') return loadSiteSearchPage(state.siteSearch.query, page);
+  if (state.pageMode === 'category') return loadCategory(state.category, page);
+}
+
+function renderPagination() {
+  const visible = state.results.length > 0 && ['category', 'site-search'].includes(state.pageMode);
+  $('#pagination').style.display = visible ? 'flex' : 'none';
+  if (!visible) return;
+  const paging = getPaginationState();
+  $('#pageInfo').textContent = `${paging.page} / ${paging.totalPages}`
+    + (paging.totalItems ? ` · ${paging.totalItems}` : '');
+  $('#prevPage').disabled = paging.page <= 1;
+  $('#nextPage').disabled = paging.page >= paging.totalPages;
+  $('#pageJumpInput').max = paging.totalPages;
+  $('#pageJumpInput').value = paging.page;
+  $('#perPageSelect').value = String(paging.perPage);
+}
+
 function renderResults() {
+  renderSiteSearchStatus();
+  renderPagination();
   const container = $('#searchResults');
   if (!state.results.length) {
+    let title = t('emptyHint');
+    let detail = '';
+    if (state.pageMode === 'site-search') {
+      const search = state.siteSearch;
+      if (search.status === 'success') {
+        title = t('noResults');
+        detail = siteSearchText('siteSearchNoMatch');
+      } else if (search.status === 'error') {
+        title = t('loadFailed');
+        detail = `${siteSearchText('siteSearchFailed')} ${t('siteSearchRetry')}`;
+      } else {
+        title = t(search.status === 'loading' ? 'loading' : 'siteSearchHint');
+      }
+    } else if (state.pageMode === 'search') {
+      title = t('noResults');
+    }
     container.innerHTML = `<div class="empty-state">
       <svg viewBox="0 0 120 120" width="80" height="80">
         <circle cx="60" cy="60" r="50" fill="var(--bg-secondary)"/>
         <circle cx="60" cy="60" r="22" fill="none" stroke="var(--text-tertiary)" stroke-width="2.5" opacity="0.5"/>
         <path d="M52 50 L52 70 L70 60 Z" fill="var(--text-tertiary)" opacity="0.4"/>
       </svg>
-      <p>${escapeHtml(t('emptyHint'))}</p>
+      <p>${escapeHtml(title)}</p>
+      ${detail ? `<p class="empty-detail">${escapeHtml(detail)}</p>` : ''}
     </div>`;
-    $('#pagination').style.display = 'none';
     return;
   }
 
@@ -478,6 +619,7 @@ function renderResults() {
       ? categoryName(state.category)
       : categoryName(item.category) || (state.pageMode === 'site-search' ? t('tabSiteSearch') : t('tabSearch'));
     const isBm = state.bookmarks.some((b) => b.id === item.id);
+    const author = cleanPersonNames(item.author);
     return `<div class="result-card" data-id="${escapeHtml(item.id)}">
       <div class="card-cover">
         ${item.cover
@@ -487,7 +629,7 @@ function renderResults() {
       <div class="card-title">${escapeHtml(item.title)}</div>
       <div class="card-meta">
         <span class="meta-tag type-tag">${escapeHtml(catName)}</span>
-        ${item.author ? `<span class="meta-tag">${escapeHtml(item.author)}</span>` : ''}
+        ${author ? `<span class="meta-tag">${escapeHtml(author)}</span>` : ''}
       </div>
       <div class="card-actions">
         <button class="card-btn" data-action="detail" data-id="${escapeHtml(item.id)}">
@@ -519,19 +661,6 @@ function renderResults() {
     card.addEventListener('click', () => openAlbum(id, true));
   });
 
-  // pagination —— 只要有结果就显示，方便随时改每页条数
-  if (state.results.length && state.pageMode === 'category') {
-    $('#pagination').style.display = 'flex';
-    $('#pageInfo').textContent = `${state.page} / ${state.totalPages}`
-      + (state.totalItems ? ` · ${state.totalItems}` : '');
-    $('#prevPage').disabled = state.page <= 1;
-    $('#nextPage').disabled = state.page >= state.totalPages;
-    $('#pageJumpInput').max = state.totalPages;
-    $('#pageJumpInput').value = state.page;
-    $('#perPageSelect').value = String(state.perPage);
-  } else {
-    $('#pagination').style.display = 'none';
-  }
 }
 
 function itemsById(id) {
@@ -1188,9 +1317,11 @@ function updateBadges() {
 // ---------------- local discovery & library ----------------
 
 async function localSearch() {
+  cancelSiteSearch();
   const query = $('#localSearchInput').value.trim();
   const requestSeq = ++state.categoryRequestSeq;
   state.pageMode = 'search';
+  renderSiteSearchStatus();
   showLoading(t('loading'));
   try {
     const data = await api('/api/search', { q: query });
@@ -1213,34 +1344,74 @@ async function localSearch() {
 }
 
 async function siteSearch() {
-  const query = $('#siteSearchInput').value.trim();
+  return loadSiteSearchPage($('#siteSearchInput').value.trim(), 1);
+}
+
+async function loadSiteSearchPage(query, page = 1) {
+  cancelSiteSearch();
+  query = String(query ?? '').trim();
+  const requestedPage = Math.max(1, parseInt(page, 10) || 1);
+  const perPage = state.perPage;
   const requestSeq = ++state.categoryRequestSeq;
   state.pageMode = 'site-search';
-  if (!query) {
-    state.results = [];
-    renderResults();
-    hideLoading();
-    return;
-  }
-  // 只有第一次（索引尚未就绪）才提示“需加载全站索引”
-  showLoading(state.siteSearchLoaded ? t('loading') : t('siteSearchLoading'));
+  state.results = [];
+  state.siteSearch = {
+    query, status: query ? 'loading' : 'idle', total: 0, indexed: 0, error: '', errorKey: '',
+    page: requestedPage, perPage, totalPages: 1,
+  };
+  // 全站搜索只显示局部等待，切换标签时也清除之前的全屏遮罩。
+  hideLoading();
+  renderResults();
+  if (!query) return;
+
+  const request = { controller: new AbortController(), timer: null, timedOut: false };
+  request.timer = setTimeout(() => {
+    request.timedOut = true;
+    request.controller.abort();
+  }, SITE_SEARCH_TIMEOUT_MS);
+  siteSearchRequest = request;
   try {
-    const data = await api('/api/site-search', { q: query });
+    const data = await api('/api/site-search', { q: query, page: requestedPage, perPage }, { signal: request.controller.signal });
     if (requestSeq !== state.categoryRequestSeq) return;
+    if (request.controller.signal.aborted) {
+      throw request.controller.signal.reason || new Error(t('networkError'));
+    }
+    if (!Number.isInteger(data.page) || data.page < 1
+      || !Number.isInteger(data.perPage) || data.perPage < 1
+      || !Number.isInteger(data.totalPages) || data.totalPages < 1 || data.page > data.totalPages) {
+      const error = new Error(t('siteSearchRestart'));
+      error.i18nKey = 'siteSearchRestart';
+      throw error;
+    }
     state.siteSearchLoaded = true;
     state.results = data.items || [];
+    state.siteSearch.status = 'success';
+    state.siteSearch.total = Number(data.total) || state.results.length;
+    state.siteSearch.indexed = Number(data.indexed) || 0;
+    state.siteSearch.page = data.page;
+    state.siteSearch.perPage = data.perPage;
+    state.siteSearch.totalPages = data.totalPages;
     renderResults();
     loadSiteSearchCovers(requestSeq);
   } catch (e) {
     if (requestSeq !== state.categoryRequestSeq) return;
-    showToast(`${t('loadFailed')}: ${e.message}`);
+    state.results = [];
+    state.siteSearch.status = 'error';
+    state.siteSearch.errorKey = request.timedOut ? 'siteSearchTimeout' : (e.i18nKey || '');
+    state.siteSearch.error = state.siteSearch.errorKey ? t(state.siteSearch.errorKey) : e.message;
+    renderResults();
+    showToast(`${t('loadFailed')}: ${state.siteSearch.error}`);
   } finally {
-    if (requestSeq === state.categoryRequestSeq) hideLoading();
+    clearTimeout(request.timer);
+    if (siteSearchRequest === request) {
+      siteSearchRequest = null;
+      renderSiteSearchStatus();
+    }
   }
 }
 
 async function loadSiteSearchCovers(requestSeq) {
-  const ids = state.results.filter((item) => !item.cover).map((item) => item.id).slice(0, 60);
+  const ids = state.results.filter((item) => !item.cover).map((item) => item.id);
   if (!ids.length) return;
   for (let offset = 0; offset < ids.length; offset += 12) {
     try {
@@ -1583,27 +1754,30 @@ function bindEvents() {
     if (e.key === 'Enter') openAlbum($('#albumInput').value, true);
   });
 
-  // pagination
+  // 分页栏共用，分类与全站搜索保留各自的页码和查询。
   $('#prevPage').addEventListener('click', () => {
-    if (state.page > 1) loadCategory(state.category, state.page - 1);
+    const paging = getPaginationState();
+    if (paging.page > 1) loadResultsPage(paging.page - 1);
   });
   $('#nextPage').addEventListener('click', () => {
-    if (state.page < state.totalPages) loadCategory(state.category, state.page + 1);
+    const paging = getPaginationState();
+    if (paging.page < paging.totalPages) loadResultsPage(paging.page + 1);
   });
   $('#pageJumpBtn').addEventListener('click', () => {
     const n = parseInt($('#pageJumpInput').value, 10);
-    if (n >= 1 && n <= state.totalPages) loadCategory(state.category, n);
+    if (n >= 1 && n <= getPaginationState().totalPages) loadResultsPage(n);
   });
   $('#pageJumpInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#pageJumpBtn').click();
   });
 
-  // 每页条数
+  // 共享条数设置改变后回第一页，避免分类保存的旧页码失效。
   $('#perPageSelect').addEventListener('change', (e) => {
     const v = parseInt(e.target.value, 10) || 20;
     state.perPage = v;
+    state.page = 1;
     localStorage.setItem('perPage', v);
-    loadCategory(state.category, 1);
+    loadResultsPage(1);
   });
 
   // modal
